@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.5.0 (CLI)
+
+- **Heat protection.** While battery is maintaining a limit, it pauses charging when the battery gets hotter than 35 °C and resumes once it has cooled 2 °C. Change the temperature with `battery heat 40`, or turn it off with `battery heat off`. `battery status` shows the battery temperature and whether charging is paused for heat. On Intel Macs the charge limit is held at the current level while hot, then restored.
+- **Top up.** `battery topup` charges once to 100% (for a trip, say) and then goes back to your normal limit by itself. It keeps going if maintenance restarts; `battery topup stop` cancels it.
+- **Calibration on Intel.** `battery calibrate` now works on Intel Macs too: it charges to 100%, asks you to unplug and use the Mac down to about 15%, then restores your limit. `battery calibrate stop` cancels a calibration on any Mac, and stopping it now also stops the discharge or charge step it had started.
+- The menu bar app has three new items under Advanced settings: pause charging when hot, top up to 100% once, and calibrate.
+- Settings are kept in `~/.battery` next to the existing ones (`heat.threshold`, and `topup` while a top-up is running).
+
 ## v1.4.0 (CLI)
 
 - **Intel Macs are now supported.** On Intel Macs that have the `BCLM` key, `battery maintain 80` sets the Mac's own charge limit to 80% instead of switching charging on and off every minute. It is re-applied after a reboot or wake if needed. `battery maintain stop` and `battery uninstall` put the limit back to 100%.

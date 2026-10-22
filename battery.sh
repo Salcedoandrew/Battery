@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.4.0"
+BATTERY_CLI_VERSION="v1.5.0"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -26,6 +26,8 @@ maintain_percentage_tracker_file=$configfolder/maintain.percentage
 maintain_voltage_tracker_file=$configfolder/maintain.voltage
 daemon_path=$HOME/Library/LaunchAgents/battery.plist
 calibrate_pidfile=$configfolder/calibrate.pid
+heat_threshold_file=$configfolder/heat.threshold
+topup_file=$configfolder/topup
 path_configfile=/etc/paths.d/50-battery
 
 # Voltage limits
@@ -107,10 +109,22 @@ Usage:
     manually set the adapter to (not) charge even when plugged in
     eg: battery adapter off
 
-  battery calibrate
+  battery calibrate [stop]
     calibrate the battery by discharging it to 15%, then recharging it to 100%, and keeping it there for 1 hour
+    on Intel Macs (no forced discharge): charge to 100%, then you unplug and run the battery down to about 15%
     battery maintenance is restored upon completion
-    menubar battery app execution and/or battery maintain command will interrupt calibration
+    menubar battery app execution, battery maintain, or battery calibrate stop will interrupt calibration
+
+  battery heat THRESHOLD[20-60,off]
+    while maintaining, pause charging when the battery is hotter than THRESHOLD °C (default 35)
+    and resume once it is 2 °C cooler; without a value it prints the current setting
+    eg: battery heat 35
+    eg: battery heat off
+
+  battery topup [stop]
+    while maintaining, charge once to 100%, then go back to the maintained limit automatically
+    eg: battery topup
+    eg: battery topup stop
 
   battery charge LEVEL[1-100]
     charge the battery to a certain percentage; battery maintenance is restored upon completion
@@ -296,6 +310,51 @@ function warn_if_aldente_running() {
 	fi
 }
 
+# Heat protection threshold in °C, or "off" (default 35)
+function get_heat_threshold() {
+	local threshold=$(cat "$heat_threshold_file" 2>/dev/null)
+	echo "${threshold:-35}"
+}
+
+# Battery temperature in hundredths of a °C, from ioreg
+function get_battery_temperature() {
+	ioreg -rn AppleSmartBattery | awk '/"Temperature" =/ { print $3; exit }'
+}
+
+function format_temperature() {
+	printf "%d.%d°C" $(($1 / 100)) $(($1 % 100 / 10))
+}
+
+# "hot" above the threshold, "ok" again once 2 °C below it; $1 is the previous state
+function get_heat_state() {
+	local threshold=$(get_heat_threshold) temp=$(get_battery_temperature)
+	if [[ "$threshold" == "off" || -z "$temp" ]]; then
+		echo "ok"
+	elif ((temp > threshold * 100)); then
+		echo "hot"
+	elif [[ "$1" == "hot" ]] && ((temp > (threshold - 2) * 100)); then
+		echo "hot"
+	else
+		echo "ok"
+	fi
+}
+
+function is_fully_charged() {
+	ioreg -rn AppleSmartBattery | grep -q '"FullyCharged" = Yes' || [[ "$(get_battery_percentage)" -ge 100 ]]
+}
+
+# Stop a running calibration, including the charge/discharge helper it started
+function stop_calibration() {
+	test -f "$calibrate_pidfile" || return 0
+	local pid=$(cat "$calibrate_pidfile" 2>/dev/null)
+	if [[ -n "$pid" ]]; then
+		pkill -P "$pid" &>/dev/null
+		kill "$pid" &>/dev/null
+	fi
+	rm -f "$calibrate_pidfile"
+	log "🚨 Calibration process have been stopped"
+}
+
 ## #################
 ## SMC Manipulation
 ## #################
@@ -357,7 +416,11 @@ function disable_discharging() {
 	# Keep track of status
 	is_charging=$(get_smc_charging_status)
 
-	if ! valid_percentage "$setting"; then
+	# During a top-up the target is 100%
+	local target=$setting
+	test -f "$topup_file" && target=100
+
+	if ! valid_percentage "$target"; then
 
 		log "Disabling discharging: No valid maintain percentage set, enabling charging"
 		# use direct commands since enable_charging also calls disable_discharging, and causes an eternal loop
@@ -371,15 +434,15 @@ function disable_discharging() {
 		fi
 		change_magsafe_led_color "orange"
 
-	elif [[ "$battery_percentage" -ge "$setting" && "$is_charging" == "enabled" ]]; then
+	elif [[ "$battery_percentage" -ge "$target" && "$is_charging" == "enabled" ]]; then
 
-		log "Disabling discharging: Charge above $setting, disabling charging"
+		log "Disabling discharging: Charge above $target, disabling charging"
 		disable_charging
 		change_magsafe_led_color "green"
 
-	elif [[ "$battery_percentage" -lt "$setting" && "$is_charging" == "disabled" ]]; then
+	elif [[ "$battery_percentage" -lt "$target" && "$is_charging" == "disabled" ]]; then
 
-		log "Disabling discharging: Charge below $setting, enabling charging"
+		log "Disabling discharging: Charge below $target, enabling charging"
 		# use direct commands since enable_charging also calls disable_discharging, and causes an eternal loop
 		if [[ "$smc_supports_tahoe" == "true" ]]; then
 			smc_write_hex CHTE 00000000
@@ -965,11 +1028,7 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 	log_smc_capabilities
 
 	# Checking if the calibration process is running
-	if test -f "$calibrate_pidfile"; then
-		pid=$(cat "$calibrate_pidfile" 2>/dev/null)
-		kill $pid &>/dev/null
-		log "🚨 Calibration process have been stopped"
-	fi
+	stop_calibration
 
 	# Recover old maintain status if old setting is found
 	if [[ "$setting" == "recover" ]]; then
@@ -1025,8 +1084,31 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 	if [[ "$smc_uses_bclm" == "true" ]]; then
 		echo $$ >"$pidfile"
 		log "Maintaining battery at $upper_bound% via the firmware charge limit (BCLM)"
+		heat_state=ok
 		while [[ "$(cat "$pidfile" 2>/dev/null)" == "$$" ]]; do
-			[[ "$(get_bclm_limit)" == "$((upper_bound < 20 ? 20 : upper_bound))" ]] || set_bclm_limit "$upper_bound"
+			target=$upper_bound
+
+			# Top-up: limit off (100%) until full, then back to the normal limit
+			if test -f "$topup_file"; then
+				if is_fully_charged; then
+					rm -f "$topup_file"
+					log "🔋 Top-up complete, back to $upper_bound%"
+				else
+					target=100
+				fi
+			fi
+
+			# Heat protection: while hot, cap the limit at the level the battery had when it got hot
+			previous_heat_state=$heat_state
+			heat_state=$(get_heat_state "$heat_state")
+			if [[ "$heat_state" == "hot" ]]; then
+				[[ "$previous_heat_state" == "hot" ]] || hot_limit=$(get_battery_percentage)
+				((hot_limit < target)) && target=$hot_limit
+			fi
+			[[ "$heat_state" != "$previous_heat_state" ]] && log "🌡️ Battery at $(format_temperature "$(get_battery_temperature)"), heat protection $([[ "$heat_state" == "hot" ]] && echo "pausing" || echo "resuming") charging"
+
+			((target < 20)) && target=20
+			[[ "$(get_bclm_limit)" == "$target" ]] || set_bclm_limit "$target"
 			sleep 60
 		done
 		log "Maintenance was stopped or replaced, exiting"
@@ -1043,23 +1125,46 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 	fi
 
 	# Loop until battery percent is exceeded
+	heat_state=ok
 	while true; do
 
 		# Keep track of status
 		is_charging=$(get_smc_charging_status)
 		ac_attached=$(get_charger_state)
 
-		if [[ "$battery_percentage" -ge "$upper_bound" && ("$is_charging" == "enabled" || "$ac_attached" == "1") ]]; then
+		# Top-up: charge to 100% once, then back to the normal limit
+		lower=$lower_bound
+		upper=$upper_bound
+		if test -f "$topup_file"; then
+			if is_fully_charged; then
+				rm -f "$topup_file"
+				log "🔋 Top-up complete, back to $upper_bound%"
+			else
+				lower=100
+				upper=100
+			fi
+		fi
 
-			log "Charge at or above $upper_bound%"
+		# Heat protection: pause charging while hot, the normal rules apply again once cooled down
+		previous_heat_state=$heat_state
+		heat_state=$(get_heat_state "$heat_state")
+		[[ "$heat_state" != "$previous_heat_state" ]] && log "🌡️ Battery at $(format_temperature "$(get_battery_temperature)"), heat protection $([[ "$heat_state" == "hot" ]] && echo "pausing" || echo "resuming") charging"
+
+		if [[ "$heat_state" == "hot" ]]; then
+
+			[[ "$is_charging" == "enabled" ]] && disable_charging
+
+		elif [[ "$battery_percentage" -ge "$upper" && ("$is_charging" == "enabled" || "$ac_attached" == "1") ]]; then
+
+			log "Charge at or above $upper%"
 			if [[ "$is_charging" == "enabled" ]]; then
 				disable_charging
 			fi
 			change_magsafe_led_color "green"
 
-		elif [[ "$battery_percentage" -lt "$lower_bound" && "$is_charging" == "disabled" ]]; then
+		elif [[ "$battery_percentage" -lt "$lower" && "$is_charging" == "disabled" ]]; then
 
-			log "Charge below $lower_bound%"
+			log "Charge below $lower%"
 			enable_charging
 			change_magsafe_led_color "orange"
 
@@ -1140,15 +1245,12 @@ if [[ "$action" == "maintain" ]]; then
 		kill $pid &>/dev/null
 	fi
 
-	if test -f "$calibrate_pidfile"; then
-		pid=$(cat "$calibrate_pidfile" 2>/dev/null)
-		kill $pid &>/dev/null
-		log "🚨 Calibration process have been stopped"
-	fi
+	stop_calibration
 
 	if [[ "$setting" == "stop" ]]; then
 		log "Killing running maintain daemons & enabling charging as default state"
 		rm $pidfile 2>/dev/null
+		rm -f "$topup_file"
 		$battery_binary disable_daemon
 		enable_charging
 		$battery_binary status
@@ -1236,39 +1338,102 @@ fi
 # Battery calibration
 if [[ "$action" == "calibrate" ]]; then
 
+	# Cancel a running calibration and go back to normal maintenance
+	if [[ "$setting" == "stop" ]]; then
+		stop_calibration
+		$battery_binary maintain recover
+		exit 0
+	fi
+
 	# Stop the maintaining
 	$battery_binary maintain stop &>/dev/null
 
 	# Kill old process silently
-	if test -f "$calibrate_pidfile"; then
-		pid=$(cat "$calibrate_pidfile" 2>/dev/null)
-		kill $pid &>/dev/null
-	fi
+	stop_calibration &>/dev/null
 	echo $$ >$calibrate_pidfile
+
+	# Show progress in the terminal and in 'battery logs'
+	function step() {
+		echo "$*"
+		log "Calibration: $*" >>"$logfile"
+	}
 
 	echo -e "Starting battery calibration\n"
 
-	echo "[ 1 ] Discharging battery to 15%"
-	BATTERY_HELPER_MODE=1 $battery_binary discharge 15 &>/dev/null
+	if [[ "$smc_supports_discharge" == "false" ]]; then
 
-	echo "[ 2 ] Charging to 100%"
-	BATTERY_HELPER_MODE=1 $battery_binary charge 100 &>/dev/null
+		# Intel: the adapter can't be switched off, so the user runs the battery down
+		step "[ 1 ] Charging to 100% (charge limit off)"
+		BATTERY_HELPER_MODE=1 $battery_binary charge 100 &>/dev/null
 
-	echo "[ 3 ] Reached 100%, waiting for 1 hour"
-	enable_charging &>/dev/null
-	sleep 3600
+		step "[ 2 ] Full. Unplug the charger and use your Mac until the battery is at about 15% (checked every minute)"
+		while [[ "$(get_battery_percentage)" -gt 15 ]]; do
+			sleep 60
+		done
 
-	echo "[ 4 ] Discharging battery to 80%"
-	BATTERY_HELPER_MODE=1 $battery_binary discharge 80 &>/dev/null
+		step "[ 3 ] Reached 15%. Plug the charger back in"
+
+	else
+
+		step "[ 1 ] Discharging battery to 15%"
+		BATTERY_HELPER_MODE=1 $battery_binary discharge 15 &>/dev/null
+
+		step "[ 2 ] Charging to 100%"
+		BATTERY_HELPER_MODE=1 $battery_binary charge 100 &>/dev/null
+
+		step "[ 3 ] Reached 100%, waiting for 1 hour"
+		enable_charging &>/dev/null
+		sleep 3600
+
+		step "[ 4 ] Discharging battery to 80%"
+		BATTERY_HELPER_MODE=1 $battery_binary discharge 80 &>/dev/null
+
+	fi
 
 	# Remove pidfile
 	rm -f $calibrate_pidfile
 
 	# Recover old maintain status
-	echo "[ 5 ] Restarting battery maintenance"
+	step "[ 5 ] Restarting battery maintenance"
 	$battery_binary maintain recover &>/dev/null
 
 	echo -e "\n✅ Done\n"
+	exit 0
+
+fi
+
+# Heat protection setting
+if [[ "$action" == "heat" ]]; then
+
+	if [[ -z "$setting" ]]; then
+		get_heat_threshold
+	elif [[ "$setting" == "off" ]] || [[ "$setting" =~ ^[0-9]+$ && "$setting" -ge 20 && "$setting" -le 60 ]]; then
+		echo "$setting" >"$heat_threshold_file"
+		[[ "$setting" == "off" ]] && log "🌡️ Heat protection off" || log "🌡️ Heat protection: pause charging above ${setting}°C (takes effect within a minute while maintaining)"
+	else
+		log "Error: $setting is not a valid heat threshold. Use a number of °C between 20 and 60, or 'off'"
+		exit 1
+	fi
+	exit 0
+
+fi
+
+# Top up to 100% once
+if [[ "$action" == "topup" ]]; then
+
+	assert_not_running_as_root
+
+	if [[ "$setting" == "stop" ]]; then
+		rm -f "$topup_file"
+		log "🔋 Top-up cancelled, back to the maintained limit within a minute"
+	elif ! test -f "$pidfile"; then
+		log "battery is not maintaining a limit, so charging already goes to 100%. Nothing to do."
+	elif test -f "$maintain_voltage_tracker_file"; then
+		log "Top-up only works while maintaining a percentage, not a voltage"
+	else
+		touch "$topup_file"
+		log "🔋 Topping up to 100% once (starts within a minute), then back to $(get_maintain_percentage)%"
+	fi
 	exit 0
 
 fi
@@ -1280,6 +1445,17 @@ if [[ "$action" == "status" ]]; then
 	if [[ "$smc_uses_bclm" == "true" ]]; then
 		log "Firmware charge limit (BCLM): $(get_bclm_limit)%"
 	fi
+	heat_threshold=$(get_heat_threshold)
+	battery_temperature=$(get_battery_temperature)
+	if [[ "$heat_threshold" == "off" ]]; then
+		log "Heat protection: off (battery at $(format_temperature "${battery_temperature:-0}"))"
+	elif ((${battery_temperature:-0} > heat_threshold * 100)); then
+		log "Heat protection: battery at $(format_temperature "$battery_temperature"), above ${heat_threshold}°C, charging paused"
+	else
+		log "Heat protection: pauses charging above ${heat_threshold}°C (battery at $(format_temperature "${battery_temperature:-0}"))"
+	fi
+	test -f "$topup_file" && log "Top-up to 100% in progress, then back to the maintained limit"
+	test -f "$calibrate_pidfile" && log "Calibration in progress, see 'battery logs' for the current step"
 	warn_if_aldente_running
 	if test -f $pidfile; then
 		maintain_percentage=$(cat $maintain_percentage_tracker_file 2>/dev/null)

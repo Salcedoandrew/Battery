@@ -17,6 +17,12 @@ This works on Apple Silicon Macs and, since CLI v1.4.0, on Intel Macs whose SMC 
 - Don't run AlDente at the same time: it writes the same key, so the two would override each other. battery warns when AlDente is running.
 - `battery status` shows the real charging state from `ioreg` (charging current), because `pmset` can lag for minutes.
 
+#### Heat protection, top up and calibration (v1.5.0)
+
+- While maintaining, charging pauses when the battery is above 35 °C and resumes 2 °C lower. `battery heat 40` changes the threshold (20-60 °C), `battery heat off` disables it. It applies within a minute.
+- `battery topup` charges once to 100%, then returns to your limit automatically; `battery topup stop` cancels.
+- `battery calibrate` on Intel charges to 100% and then asks you to unplug and run the battery down to about 15% (Intel has no forced discharge). On Apple Silicon it works as before. `battery calibrate stop` cancels.
+
 ### Installation
 
 - Option 1: install the app through brew with `brew install battery`

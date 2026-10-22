@@ -1,6 +1,6 @@
 const { shell, app, Tray, Menu, powerMonitor, nativeTheme } = require( 'electron' )
-const { enable_battery_limiter, disable_battery_limiter, initialize_battery, is_limiter_enabled, get_battery_status, uninstall_battery } = require( './battery' )
-const { log } = require( "./helpers" )
+const { enable_battery_limiter, disable_battery_limiter, initialize_battery, is_limiter_enabled, get_battery_status, uninstall_battery, run_battery_command } = require( './battery' )
+const { log, confirm } = require( "./helpers" )
 const { get_logo_template } = require( './theme' )
 const { get_force_discharge_setting, update_force_discharge_setting } = require( './settings' )
 
@@ -22,6 +22,9 @@ const generate_app_menu = async () => {
 
         // Check force discharge setting
         const allow_discharge = get_force_discharge_setting()
+
+        // Heat protection threshold in °C, or 'off'
+        const heat_threshold = await run_battery_command( 'heat' ) || '35'
 
         // Set tray icon
         log( `Generate app menu percentage: ${ percentage } (discharge ${ allow_discharge ? 'allowed' : 'disallowed' }, limited ${ limiter_on ? 'on' : 'off' })` )
@@ -66,6 +69,23 @@ const generate_app_menu = async () => {
                         click: async () => {
                             const success = await update_force_discharge_setting()
                             if( limiter_on && success ) await restart_limiter()
+                        }
+                    },
+                    {
+                        label: `Pause charging when hot (above ${ heat_threshold == 'off' ? 35 : heat_threshold }°C)`,
+                        type: 'checkbox',
+                        checked: heat_threshold != 'off',
+                        click: () => run_battery_command( `heat ${ heat_threshold == 'off' ? 35 : 'off' }` )
+                    },
+                    {
+                        label: `Top up to 100% once`,
+                        enabled: limiter_on,
+                        click: () => run_battery_command( 'topup' )
+                    },
+                    {
+                        label: `Calibrate battery...`,
+                        click: async () => {
+                            if( await confirm( `Calibrate the battery? It runs the battery down and charges it to 100%, which can take many hours. Progress shows in 'battery status' and 'battery logs'; 'battery calibrate stop' cancels it.` ) ) run_battery_command( 'calibrate', true )
                         }
                     }
                 ]

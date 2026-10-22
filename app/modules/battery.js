@@ -283,7 +283,16 @@ const is_limiter_enabled = async () => {
 
 }
 
+// Run a battery CLI command, e.g. 'topup' or 'heat 35'; background=true for long-running ones like 'calibrate'
+const run_battery_command = ( args, background=false ) => exec_async( background ? `nohup ${ battery } ${ args } >/dev/null 2>&1 &` : `${ battery } ${ args }` )
+    .then( ( { stdout } ) => stdout.trim() )
+    .catch( e => {
+        log( `Error running battery ${ args }: `, e )
+        alert( `Battery error: ${ e.message }` )
+    } )
+
 module.exports = {
+    run_battery_command,
     enable_battery_limiter,
     disable_battery_limiter,
     initialize_battery,
