@@ -20,7 +20,7 @@ This works on Apple Silicon Macs and, since CLI v1.4.0, on Intel Macs whose SMC 
 ### Installation
 
 - Option 1: install the app through brew with `brew install battery`
-- Option 2: [download the app dmg version here](https://github.com/actuallymentor/battery/releases/)
+- Option 2: [download the app dmg version here](https://github.com/Salcedoandrew/battery/releases/) (this fork currently ships the CLI only; use Option 3)
 - Option 3: install ONLY the command line interface (see section below)
 
 When installing via brew or dmg, opening the macOS app is required to complete the installation.
@@ -51,7 +51,7 @@ The CLI is used for managing the battery charging status for Apple Silicon and I
 One-line installation:
 
 ```bash
-curl -s https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh | bash
+curl -s https://raw.githubusercontent.com/Salcedoandrew/battery/main/setup.sh | bash
 ```
 
 This will:

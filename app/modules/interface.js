@@ -75,7 +75,7 @@ const generate_app_menu = async () => {
                 submenu: [
                     {
                         label: `Check for updates`,
-                        click: () => shell.openExternal( `https://github.com/actuallymentor/battery/releases` )
+                        click: () => shell.openExternal( `https://github.com/Salcedoandrew/battery/releases` )
                     },
                     {
                         type: 'normal',

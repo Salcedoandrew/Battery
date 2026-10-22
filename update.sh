@@ -38,7 +38,7 @@ fi
 # more comprehensive checks in 'battery update' in order to trigger 'battery reinstall' when needed.
 if [[ $EUID -ne 0 && ! -x "$binfolder/battery" ]]; then
 	echo -e "💡 This battery update requires a full reinstall...\n"
-	curl -sS "https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh" | bash
+	curl -sS "https://raw.githubusercontent.com/Salcedoandrew/battery/main/setup.sh" | bash
 	$binfolder/battery maintain recover
 	exit 0
 fi
@@ -53,7 +53,7 @@ updatefolder="$tempfolder/battery"
 mkdir -p $updatefolder
 
 echo "[ 2 ] Downloading the latest battery version"
-if ! curl -sS -o $updatefolder/battery.sh https://raw.githubusercontent.com/actuallymentor/battery/main/battery.sh; then
+if ! curl -sS -o $updatefolder/battery.sh https://raw.githubusercontent.com/Salcedoandrew/battery/main/battery.sh; then
 	err=$?
 	echo -e "\n❌ Failed to download the update.\n"
 	exit $err

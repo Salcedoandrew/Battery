@@ -10,3 +10,4 @@
 - Setup now checks which charging keys your Mac has, instead of assuming Apple Silicon.
 - The menu bar app is built as a universal app (Apple Silicon + Intel).
 - The passwordless `sudo` rules now also allow reading `BCLM` and setting it to 20-100%.
+- Install and update downloads (setup, `battery update`, the menu bar app) now come from this fork, github.com/Salcedoandrew/battery (`main` branch), instead of the original project. Credits to the original battery project by actuallymentor stay in place.
