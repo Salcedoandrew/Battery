@@ -228,6 +228,15 @@ const initialize_battery = async () => {
             // Try updating to the latest version
             if( !online ) return log( `Skipping battery update because we are offline` )
             if( skipupdate ) return log( `Skipping update due to environment variable` )
+            // Only update when GitHub has a newer CLI, so a locally installed newer build is never downgraded
+            const version_of = v => ( v.match( /v?(\d+)\.(\d+)\.(\d+)/ ) || [] ).slice( 1 ).map( Number )
+            const [ { stdout: local }, { stdout: remote } ] = await Promise.all( [
+                exec_async( `${ battery } version` ),
+                exec_async( `curl -fsS https://raw.githubusercontent.com/Salcedoandrew/battery/main/battery.sh | sed -n 's/^BATTERY_CLI_VERSION="\\(.*\\)"/\\1/p'` ).catch( () => ( { stdout: '' } ) )
+            ] )
+            const [ l, r ] = [ version_of( local ), version_of( remote ) ]
+            const remote_is_newer = r.length == 3 && ( l.length != 3 || r[0] - l[0] || r[1] - l[1] || r[2] - l[2] ) > 0
+            if( !remote_is_newer ) return log( `Skipping update: installed CLI ${ local.trim() }, GitHub ${ remote.trim() || 'unknown' }` )
             log( `Updating battery...` )
             try {
                 const result = await exec_async( `sudo -n ${ battery } update_silent` )
