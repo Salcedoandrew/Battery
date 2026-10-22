@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.3.4"
+BATTERY_CLI_VERSION="v1.4.0"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -131,6 +131,9 @@ Usage:
 
 "
 
+# Intel Macs: the firmware charge limit key BCLM accepts 20-100% (hex 14-64); allow exactly those writes
+bclm_write_commands=$(for ((i = 20; i <= 100; i++)); do printf "%s, " "$smc_binary -k BCLM -w $(printf %02x $i)"; done)
+
 # Visudo instructions
 # File location: /etc/sudoers.d/battery
 # Purpose:
@@ -149,12 +152,15 @@ Cmnd_Alias    CHARGING_OFF = $smc_binary -k CH0B -w 02, $smc_binary -k CH0C -w 0
 Cmnd_Alias    CHARGING_ON = $smc_binary -k CH0B -w 00, $smc_binary -k CH0C -w 00, $smc_binary -k CHTE -w 00000000
 Cmnd_Alias    FORCE_DISCHARGE_OFF = $smc_binary -k CH0I -w 00, $smc_binary -k CHIE -w 00, $smc_binary -k CH0J -w 00
 Cmnd_Alias    FORCE_DISCHARGE_ON = $smc_binary -k CH0I -w 01, $smc_binary -k CHIE -w 08, $smc_binary -k CH0J -w 01
+Cmnd_Alias    BCLM_LIMIT = ${bclm_write_commands%, }
 Cmnd_Alias    LED_CONTROL = $smc_binary -k ACLC -w 04, $smc_binary -k ACLC -w 03, $smc_binary -k ACLC -w 02, $smc_binary -k ACLC -w 01, $smc_binary -k ACLC -w 00
 ALL ALL = NOPASSWD: CHARGING_OFF
 ALL ALL = NOPASSWD: CHARGING_ON
 ALL ALL = NOPASSWD: FORCE_DISCHARGE_OFF
 ALL ALL = NOPASSWD: FORCE_DISCHARGE_ON
 ALL ALL = NOPASSWD: LED_CONTROL
+ALL ALL = NOPASSWD: BCLM_LIMIT
+ALL ALL = NOPASSWD: $smc_binary -k BCLM -r
 
 # Temporarily keep passwordless SMC reading commands so the old menubar GUI versions don't ask for password on each launch
 # trying to execute 'battery visudo'. There is no harm in removing this, so do it as soon as you believe users are no
@@ -246,9 +252,48 @@ function smc_write_hex() {
 [[ $($smc_binary -k CHIE -r) =~ "no data" ]] && smc_supports_adapter_chie=false || smc_supports_adapter_chie=true;
 [[ $($smc_binary -k CH0I -r) =~ "no data" ]] && smc_supports_adapter_ch0i=false || smc_supports_adapter_ch0i=true;
 [[ $($smc_binary -k CH0J -r) =~ "no data" || $($smc_binary -k CH0J -r) =~ "Error" ]] && smc_supports_adapter_ch0j=false || smc_supports_adapter_ch0j=true;
+[[ $($smc_binary -k BCLM -r) =~ "no data" ]] && smc_supports_bclm=false || smc_supports_bclm=true;
+# Intel Macs only have the firmware charge limit key BCLM: use it when the Apple Silicon charging keys are missing
+[[ "$smc_supports_tahoe" == "false" && "$smc_supports_legacy" == "false" && "$smc_supports_bclm" == "true" ]] && smc_uses_bclm=true || smc_uses_bclm=false
+[[ "$smc_supports_adapter_chie" == "true" || "$smc_supports_adapter_ch0i" == "true" || "$smc_supports_adapter_ch0j" == "true" ]] && smc_supports_discharge=true || smc_supports_discharge=false
 
 function log_smc_capabilities() {
-	log "SMC capabilities: tahoe=$smc_supports_tahoe legacy=$smc_supports_legacy CHIE=$smc_supports_adapter_chie CH0I=$smc_supports_adapter_ch0i CH0J=$smc_supports_adapter_ch0j"
+	log "SMC capabilities: tahoe=$smc_supports_tahoe legacy=$smc_supports_legacy BCLM=$smc_supports_bclm CHIE=$smc_supports_adapter_chie CH0I=$smc_supports_adapter_ch0i CH0J=$smc_supports_adapter_ch0j"
+}
+
+# Set the Intel firmware charge limit (BCLM, one byte, 20-100%)
+function set_bclm_limit() {
+	local limit=$1
+	((limit < 20)) && limit=20
+	((limit > 100)) && limit=100
+	log "🔋 Setting firmware charge limit (BCLM) to $limit%"
+	smc_write_hex BCLM "$(printf %02x "$limit")"
+}
+
+function get_bclm_limit() {
+	local hex=$(smc_read_hex BCLM)
+	[[ -n "$hex" ]] && echo $((16#$hex))
+}
+
+# Actual charging state from ioreg; pmset lags behind SMC changes by up to minutes
+function get_ioreg_charging_state() {
+	local data=$(ioreg -rn AppleSmartBattery | grep '"ChargerData"')
+	local current=$(echo "$data" | grep -oE '"ChargingCurrent"=[0-9]+' | cut -d= -f2)
+	local reason=$(echo "$data" | grep -oE '"NotChargingReason"=[0-9]+' | cut -d= -f2)
+	if [[ -z "$current" ]]; then
+		echo "unknown"
+	elif ((current > 0)) && [[ "${reason:-0}" == "0" ]]; then
+		echo "charging (${current}mA)"
+	else
+		echo "not charging"
+	fi
+}
+
+# AlDente writes the same SMC keys; two controllers fight each other
+function warn_if_aldente_running() {
+	if pgrep -qif "aldente"; then
+		log "⚠️ AlDente is running. It controls the same charging keys as battery, so the two will override each other. Quit AlDente (and disable its charge limiter) to use battery."
+	fi
 }
 
 ## #################
@@ -259,6 +304,9 @@ function log_smc_capabilities() {
 # see community sleuthing: https://github.com/actuallymentor/battery/issues/71
 function change_magsafe_led_color() {
 	local color=$1
+
+	# Intel Macs have no ACLC LED key
+	[[ "$smc_uses_bclm" == "true" ]] && return
 
 	log "💡 Setting magsafe color to $color"
 
@@ -278,6 +326,10 @@ function change_magsafe_led_color() {
 # Re:discharging, we're using keys uncovered by @howie65: https://github.com/actuallymentor/battery/issues/20#issuecomment-1364540704
 # CH0I seems to be the "disable the adapter" key
 function enable_discharging() {
+	if [[ "$smc_supports_discharge" == "false" ]]; then
+		log "⚠️ Forced discharge is not supported on this Mac (no CHIE/CH0I/CH0J SMC key), skipping"
+		return 1
+	fi
 	log "🔽🪫 Enabling battery discharging"
 	if [[ "$smc_supports_adapter_chie" == "true" ]]; then
 		smc_write_hex CHIE 08
@@ -290,6 +342,8 @@ function enable_discharging() {
 }
 
 function disable_discharging() {
+	# Nothing to disable on Macs without a discharge key (Intel)
+	[[ "$smc_supports_discharge" == "false" ]] && return
 	log "🔼🪫 Disabling battery discharging"
 	if [[ "$smc_supports_adapter_chie" == "true" ]]; then
 		smc_write_hex CHIE 00
@@ -352,6 +406,8 @@ function enable_charging() {
 	elif [[ "$smc_supports_legacy" == "true" ]]; then
 		smc_write_hex CH0B 00
 		smc_write_hex CH0C 00
+	elif [[ "$smc_uses_bclm" == "true" ]]; then
+		set_bclm_limit 100
 	else
 		log "⚠️ Unable to determine SMC keys for enabling charging"
 	fi
@@ -365,12 +421,22 @@ function disable_charging() {
 	elif [[ "$smc_supports_legacy" == "true" ]]; then
 		smc_write_hex CH0B 02
 		smc_write_hex CH0C 02
+	elif [[ "$smc_uses_bclm" == "true" ]]; then
+		# Intel: cap the firmware limit at the current level so it stops charging
+		set_bclm_limit "$(get_battery_percentage)"
 	else
 		log "⚠️ Unable to determine SMC keys for disabling charging"
 	fi
 }
 
 function get_smc_charging_status() {
+	# Intel: charging counts as "enabled" only when the firmware limit is off (100%)
+	if [[ "$smc_uses_bclm" == "true" ]]; then
+		local limit=$(get_bclm_limit)
+		[[ -z "$limit" ]] && echo "unknown" && return
+		[[ "$limit" == "100" ]] && echo "enabled" || echo "disabled"
+		return
+	fi
 	local status_key="CH0B"
 	if [[ "$smc_supports_tahoe" == "true" ]]; then
 		status_key="CHTE"
@@ -394,6 +460,7 @@ function get_smc_charging_status() {
 }
 
 function get_smc_discharging_status() {
+	[[ "$smc_supports_discharge" == "false" ]] && echo "not discharging" && return
 	local status_key="CH0I"
 	if [[ "$smc_supports_adapter_chie" == "true" ]]; then
 		status_key="CHIE"
@@ -755,6 +822,7 @@ fi
 if [[ "$action" == "charging" ]]; then
 
 	log "Setting $action to $setting"
+	warn_if_aldente_running
 
 	# Disable running daemon
 	$battery_binary maintain stop
@@ -769,6 +837,10 @@ if [[ "$action" == "charging" ]]; then
 		exit 1
 	fi
 
+	# Confirm with ioreg (pmset lags)
+	sleep 5
+	log "Battery is now $(get_ioreg_charging_state) (ioreg)"
+
 	exit 0
 
 fi
@@ -777,6 +849,11 @@ fi
 if [[ "$action" == "adapter" ]]; then
 
 	log "Setting $action to $setting"
+
+	if [[ "$smc_supports_discharge" == "false" ]]; then
+		log "⚠️ This Mac has no SMC key to disconnect the adapter (Intel), nothing to do"
+		exit 0
+	fi
 
 	# Disable running daemon
 	$battery_binary maintain stop
@@ -844,6 +921,11 @@ if [[ "$action" == "discharge" ]]; then
 	if ! valid_percentage "$setting"; then
 		log "Error: $setting is not a valid setting for battery discharge. Please use a number between 0 and 100"
 		exit 1
+	fi
+
+	if [[ "$smc_supports_discharge" == "false" ]]; then
+		log "⚠️ Forced discharge is not supported on this Mac (no CHIE/CH0I/CH0J SMC key, e.g. Intel). Unplug the charger to discharge. Skipping."
+		exit 0
 	fi
 
 	# Stop battery maintenance if invoked by user from Terminal
@@ -934,6 +1016,21 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 		log "Discharge pre battery-maintenance complete, continuing to battery maintenance loop"
 	else
 		log "Not triggering discharge as it is not requested"
+	fi
+
+	# Intel: the firmware holds the limit itself, so write BCLM once instead of toggling charging.
+	# BCLM can reset on reboot/wake, so check it every minute and re-apply only if it changed.
+	# This process owns the pidfile (also when started at login), and exits once 'maintain stop' or a
+	# new 'maintain' replaces it, so a stale loop can never re-apply an old limit.
+	if [[ "$smc_uses_bclm" == "true" ]]; then
+		echo $$ >"$pidfile"
+		log "Maintaining battery at $upper_bound% via the firmware charge limit (BCLM)"
+		while [[ "$(cat "$pidfile" 2>/dev/null)" == "$$" ]]; do
+			[[ "$(get_bclm_limit)" == "$((upper_bound < 20 ? 20 : upper_bound))" ]] || set_bclm_limit "$upper_bound"
+			sleep 60
+		done
+		log "Maintenance was stopped or replaced, exiting"
+		exit 0
 	fi
 
 	# Start charging
@@ -1032,6 +1129,7 @@ fi
 if [[ "$action" == "maintain" ]]; then
 
 	assert_not_running_as_root
+	warn_if_aldente_running
 
 	disable_discharging
 
@@ -1178,7 +1276,11 @@ fi
 # Status logger
 if [[ "$action" == "status" ]]; then
 
-	log "Battery at $(get_battery_percentage)% ($(get_remaining_time) remaining), $(get_voltage)V, smc charging $(get_smc_charging_status)"
+	log "Battery at $(get_battery_percentage)% ($(get_remaining_time) remaining), $(get_voltage)V, smc charging $(get_smc_charging_status), $(get_ioreg_charging_state) (ioreg)"
+	if [[ "$smc_uses_bclm" == "true" ]]; then
+		log "Firmware charge limit (BCLM): $(get_bclm_limit)%"
+	fi
+	warn_if_aldente_running
 	if test -f $pidfile; then
 		maintain_percentage=$(cat $maintain_percentage_tracker_file 2>/dev/null)
 		if [[ $maintain_percentage ]]; then

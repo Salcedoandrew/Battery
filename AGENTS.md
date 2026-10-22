@@ -1,4 +1,4 @@
-This repository contains software that limits the battery charging level of apple silicon macbooks.
+This repository contains software that limits the battery charging level of Apple Silicon and Intel (BCLM) macbooks.
 
 ## Project structure
 

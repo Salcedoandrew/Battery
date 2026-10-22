@@ -1,7 +1,7 @@
 {
   "name": "battery",
   "version": "1.4.0",
-  "description": "A battery charge limiter for Apple silicon Mac devices",
+  "description": "A battery charge limiter for Apple silicon and Intel Mac devices",
   "main": "main.js",
   "build": {
     "appId": "co.palokaj.battery",
@@ -28,7 +28,7 @@
   "scripts": {
     "start": "development=true electron .",
     "start:watch": "nodemon --watch . --exec 'skipupdate=true development=true electron .'",
-    "build": "rm -rf ./dist/* && electron-builder build --mac --arm64",
+    "build": "rm -rf ./dist/* && electron-builder build --mac --universal",
     "lint": "eslint --fix src"
   },
   "repository": "https://github.com/actuallymentor/battery",

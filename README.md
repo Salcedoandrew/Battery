@@ -1,4 +1,4 @@
-# Battery charge limiter for Apple Silicon Macbook devices
+# Battery charge limiter for Apple Silicon and Intel Macbook devices
 
 <img width="300px" align="right" src="./screenshots/tray.png"/>This tool makes it possible to keep a chronically plugged in Apple Silicon Macbook at `80%` battery, since that will prolong the longevity of the battery. It is free and open-source and will remain that way.
 
@@ -6,7 +6,16 @@
 
 ### Requirements
 
-This is an app for Apple Silicon Macs. It will not work on Intel macs. Do you have an older Mac? Consider the free version of the [Al Dente](https://apphousekitchen.com/) software package. It is a good alternative and has a premium version with many more features.
+This works on Apple Silicon Macs and, since CLI v1.4.0, on Intel Macs whose SMC has the `BCLM` charge limit key (most T2 Macs, e.g. the 2018-2020 MacBook Pro). Setup checks which keys your Mac has and stops with a clear message if none are supported.
+
+#### Intel notes
+
+- On Intel, `battery maintain 80` sets the firmware charge limit (`BCLM`) to 80% once; the Mac's firmware then holds it. battery checks it every minute and re-applies it after boot or wake if macOS reset it. A range like `70-80` uses the upper value.
+- The limit must be between 20% and 100%. `battery maintain stop` and `battery uninstall` set it back to 100%.
+- `battery charging off` caps the limit at the current level; `battery charging on` sets it to 100%.
+- Forced discharge (`battery discharge`, `battery adapter off`, `--force-discharge`) is not available on Intel because there is no SMC key for it; battery says so and skips it. Unplug the charger to discharge.
+- Don't run AlDente at the same time: it writes the same key, so the two would override each other. battery warns when AlDente is running.
+- `battery status` shows the real charging state from `ioreg` (charging current), because `pmset` can lag for minutes.
 
 ### Installation
 
@@ -35,7 +44,7 @@ Do you have questions, comments, or feature requests? [Open an issue here](https
 
 The GUI app uses a command line tool under the hood. Installing the GUI automatically installs the CLI as well. You can also separately install the CLI.
 
-The CLI is used for managing the battery charging status for Apple Silicon Macbooks. Can be used to enable/disable the Macbook from charging the battery when plugged into power.
+The CLI is used for managing the battery charging status for Apple Silicon and Intel Macbooks. Can be used to enable/disable the Macbook from charging the battery when plugged into power.
 
 ### Installation
 
@@ -47,7 +56,7 @@ curl -s https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh |
 
 This will:
 
-1. Download the precompiled `smc` tool in this repo (built from the [hholtmann/smcFanControl](https://github.com/hholtmann/smcFanControl.git) repository)
+1. Download the precompiled universal `smc` tool in this repo (rebuild it with `./dist/build-smc.sh`) (built from the [hholtmann/smcFanControl](https://github.com/hholtmann/smcFanControl.git) repository)
 2. Install `smc` to `/usr/local/bin`
 3. Install `battery` to `/usr/local/bin`
 

@@ -77,6 +77,16 @@ unzip -qq $batteryfolder/repo.zip -d $batteryfolder
 cp -r $batteryfolder/$in_zip_folder_name/* $batteryfolder
 rm $batteryfolder/repo.zip
 
+# Check which charging keys this Mac has instead of assuming Apple Silicon:
+# CHTE (Apple Silicon, macOS 15+), CH0B (older Apple Silicon) or BCLM (Intel)
+chmod 755 "$batteryfolder/dist/smc"
+if ! "$batteryfolder/dist/smc" -k CHTE -r | grep -qv "no data" &&
+	! "$batteryfolder/dist/smc" -k CH0B -r | grep -qv "no data" &&
+	! "$batteryfolder/dist/smc" -k BCLM -r | grep -qv "no data"; then
+	echo "❌ This Mac has none of the supported charging keys (CHTE, CH0B or BCLM), so battery can't limit charging here."
+	exit 1
+fi
+
 echo "[  4 ] Make sure $binfolder is recreated and owned by root"
 sudo rm -rf "$binfolder" # start with an empty $binfolder and ensure there is no symlink or file at the path
 sudo install -d -m 755 -o root -g wheel "$binfolder"
