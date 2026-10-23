@@ -75,12 +75,14 @@ const generate_app_menu = async () => {
                         label: `Pause charging when hot (above ${ heat_threshold == 'off' ? 35 : heat_threshold }°C)`,
                         type: 'checkbox',
                         checked: heat_threshold != 'off',
-                        click: () => run_battery_command( `heat ${ heat_threshold == 'off' ? 35 : 'off' }` )
+                        // eslint-disable-next-line no-use-before-define
+                        click: () => run_battery_command( `heat ${ heat_threshold == 'off' ? 35 : 'off' }` ).then( () => refresh_tray() )
                     },
                     {
                         label: `Top up to 100% once`,
                         enabled: limiter_on,
-                        click: () => run_battery_command( 'topup' )
+                        // eslint-disable-next-line no-use-before-define
+                        click: () => run_battery_command( 'topup' ).then( () => refresh_tray() )
                     },
                     {
                         label: `Calibrate battery...`,
