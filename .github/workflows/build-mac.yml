@@ -1,0 +1,46 @@
+name: Build Mac app
+
+# Builds the universal macOS app (DMG + zip) and attaches it to the release,
+# so releases don't need a hand-built app from a Mac.
+#
+# Notarization is skipped in CI: the afterSign hook (app/build_hooks/
+# afterSign.js) needs APPLEID, APPLEIDPASS and TEAMID, which don't exist on
+# the runner. To turn notarization back on, add those three as repo secrets
+# and drop the "Disable notarization for CI" step below. The build is
+# unsigned without it, same as a local unsigned build — users right-click
+# the app and choose Open the first time.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    permissions:
+      contents: write # needed to upload the DMG + zip to the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Disable notarization for CI
+        working-directory: app
+        run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.build.afterSign=null;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+
+      - name: Build universal Mac app
+        working-directory: app
+        run: npm run build
+
+      - name: Upload DMG and zip to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" app/dist/battery-*-mac-universal.dmg app/dist/battery-*-mac-universal.zip --clobber
