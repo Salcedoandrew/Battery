@@ -35,9 +35,13 @@ jobs:
         working-directory: app
         run: node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.build.afterSign=null;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
 
+      # --publish never: electron-builder tries to publish the artifacts to
+      # GitHub itself when it detects CI and fails without a GH_TOKEN. We
+      # upload the DMG + zip ourselves in the step below, so publishing here
+      # is off.
       - name: Build universal Mac app
         working-directory: app
-        run: npm run build
+        run: npm run build -- --publish never
 
       - name: Upload DMG and zip to the release
         if: github.event_name == 'release'
