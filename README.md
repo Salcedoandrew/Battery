@@ -89,7 +89,7 @@ After running `battery charging on` you will see it change to this:
 For help, run `battery` without parameters:
 
 ```
-Battery CLI utility v1.0.1
+Battery CLI utility v1.5.1
 
 Usage:
 
@@ -125,11 +125,14 @@ Usage:
     ensure you don't need to call battery with sudo
     This is already used in the setup script, so you should't need it.
 
+  battery check-update
+    check whether a newer version is available on GitHub (downloads nothing, installs nothing)
+
   battery update
-    update the battery utility to the latest version
+    update the battery utility to the latest version (downloaded from the latest GitHub release and checksum-verified first)
 
   battery reinstall
-    reinstall the battery utility to the latest version (reruns the installation script)
+    reinstall the battery utility to the latest version (reruns the installation script from the latest release)
 
   battery uninstall
     enable charging, remove the smc tool, and the battery script

@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.5.0"
+BATTERY_CLI_VERSION="v1.5.1"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -48,15 +48,18 @@ binfolder="/usr/local/co.palokaj.battery"
 battery_binary="$binfolder/battery"
 smc_binary="$binfolder/smc"
 
-# GitHub URLs for setup and updates.
-# Temporarily set to your username and branch to test update functionality with your fork.
-# Security note: Do NOT allow github_user or github_branch to be injected via environment
-#                variables or any other means. Keep them hardcoded.
+# GitHub repo for releases. Updates come from GitHub *releases*, never from a
+# moving branch: `battery update` downloads battery.sh for the latest release
+# tag and checks its SHA-256 checksum (published with the release, see
+# scripts/publish-cli-assets.sh) before installing. A checksum only proves the
+# file matches the release — it does not protect against a compromised
+# GitHub account. Signing the release (e.g. minisign) would be the next step.
+# Security note: Do NOT allow github_user or github_repo to be injected via
+#                environment variables or any other means. Keep them hardcoded.
 github_user="Salcedoandrew"
-github_branch="main"
-github_url_setup_sh="https://raw.githubusercontent.com/${github_user}/battery/${github_branch}/setup.sh"
-github_url_update_sh="https://raw.githubusercontent.com/${github_user}/battery/${github_branch}/update.sh"
-github_url_battery_sh="https://raw.githubusercontent.com/${github_user}/battery/${github_branch}/battery.sh"
+github_repo="battery"
+github_api_latest_release="https://api.github.com/repos/${github_user}/${github_repo}/releases/latest"
+github_release_download="https://github.com/${github_user}/${github_repo}/releases/download"
 
 ## ###############
 ## Housekeeping
@@ -68,11 +71,12 @@ mkdir -p $configfolder
 # create logfile if needed
 touch $logfile
 
-# Trim logfile if needed
+# Trim logfile if needed (via a temp file: writing `tail` output straight back
+# into the same file empties it, because the shell truncates the file first)
 logsize=$(stat -f%z "$logfile")
 max_logsize_bytes=5000000
 if ((logsize > max_logsize_bytes)); then
-	tail -n 100 $logfile >$logfile
+	tail -n 100 "$logfile" >"$logfile.tmp" && mv "$logfile.tmp" "$logfile"
 fi
 
 # CLI help message
@@ -134,11 +138,14 @@ Usage:
     block adapter power until the battery reaches the specified level; battery maintenance is restored upon completion
     eg: battery discharge 90
 
+  battery check-update
+    check whether a newer version is available on GitHub (downloads nothing, installs nothing)
+
   battery update
-    update the battery utility to the latest version
+    update the battery utility to the latest version (downloaded from the latest GitHub release and checksum-verified first)
 
   battery reinstall
-    reinstall the battery utility to the latest version (reruns the installation script)
+    reinstall the battery utility to the latest version (reruns the installation script from the latest release)
 
   battery uninstall
     enable charging, remove the smc tool, and the battery script
@@ -666,16 +673,61 @@ function fixup_installation_owner_mode() {
 	sudo rm -f "$configfolder/visudo.tmp"
 }
 
-function is_latest_version_installed() {
-	# Check if content is reachable first with HEAD request
-	curl -sSI "$github_url_battery_sh" &>/dev/null || return 0
+## ###############
+## Updates (checked first, installed only if verified — like alic)
+## ###############
 
-	# Download the remote script then check if our version string is present.
-	# Note: piping curl directly into grep -q causes a broken-pipe error (curl error 56)
-	# because grep -q exits on first match while curl is still writing.
-	local remote_script
-	remote_script="$(curl -sS "$github_url_battery_sh" 2>/dev/null)"
-	echo "$remote_script" | grep -q "$BATTERY_CLI_VERSION"
+# Latest release tag (e.g. v1.5.1) from the GitHub Releases API, or empty
+# when GitHub can't be reached or the tag isn't a plain vX.Y.Z. Reads the
+# API, downloads nothing.
+function latest_release_tag() {
+	local tag
+	tag="$(curl -fsSL "$github_api_latest_release" 2>/dev/null \
+		| sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+	[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$tag"
+}
+
+# version_is_newer OLD NEW — true (exit 0) when NEW is a newer vX.Y.Z than OLD.
+function version_is_newer() {
+	local a="${1#v}" b="${2#v}"
+	local -a av bv
+	IFS=. read -ra av <<< "$a"
+	IFS=. read -ra bv <<< "$b"
+	local i x y
+	for i in 0 1 2; do
+		x="${av[i]:-0}"; y="${bv[i]:-0}"
+		((10#$x < 10#$y)) && return 0
+		((10#$x > 10#$y)) && return 1
+	done
+	return 1
+}
+
+# Download battery.sh and its checksum for release tag $1 into directory $2,
+# verify the SHA-256, and print the path to the verified script.
+# Refuses (exit 1) when anything fails to download, the checksum doesn't
+# match, or the script doesn't report the version it claims to be.
+# Keep in sync with update.sh, which carries the same check standalone.
+function download_verified_cli() {
+	local tag="$1" dir="$2"
+	local script_url="${github_release_download}/${tag}/battery.sh"
+	if ! curl -fsSL -o "$dir/battery.sh" "$script_url"; then
+		echo "❌ Failed to download battery.sh for $tag."
+		return 1
+	fi
+	if ! curl -fsSL -o "$dir/battery.sh.sha256" "${script_url}.sha256"; then
+		echo "❌ Failed to download the checksum for $tag. Refusing to install an unverified update."
+		return 1
+	fi
+	if ! (cd "$dir" && shasum -a 256 -c battery.sh.sha256 >/dev/null 2>&1); then
+		echo "❌ Checksum mismatch for battery.sh $tag. Refusing to install."
+		return 1
+	fi
+	if ! grep -q "BATTERY_CLI_VERSION=\"$tag\"" "$dir/battery.sh"; then
+		echo "❌ Downloaded battery.sh does not report version $tag. Refusing to install."
+		return 1
+	fi
+	echo "$dir/battery.sh"
+	return 0
 }
 
 ## ###############
@@ -759,14 +811,37 @@ if [[ "$action" == "visudo" ]]; then
 	exit 0
 fi
 
+# Check whether a newer version is available, without downloading or
+# installing anything. Exit 0 when the check ran; the message says whether
+# an update is available. The menu bar app uses this for "Check for updates".
+if [[ "$action" == "check-update" ]]; then
+	latest="$(latest_release_tag)"
+	if [[ -z "$latest" ]]; then
+		echo "❌ Can't check for updates: no internet connection (or GitHub unreachable)."
+		exit 1
+	fi
+	if version_is_newer "$BATTERY_CLI_VERSION" "$latest"; then
+		echo "Update available: $latest (you have $BATTERY_CLI_VERSION)"
+		echo "Run 'battery update' to install it."
+	else
+		echo "You're up to date ($BATTERY_CLI_VERSION)."
+	fi
+	exit 0
+fi
+
 # Reinstall helper
 if [[ "$action" == "reinstall" ]]; then
-	echo "This will run curl -sS ${github_url_setup_sh} | bash"
+	latest="$(latest_release_tag)"
+	if [[ -z "$latest" ]]; then
+		echo "❌ Can't check for updates: no internet connection (or GitHub unreachable)."
+		exit 1
+	fi
+	echo "This will reinstall battery $latest from the release (setup script for $latest)"
 	if [[ ! "$setting" == "silent" ]]; then
 		echo "Press any key to continue"
 		read
 	fi
-	curl -sS "$github_url_setup_sh" | bash
+	curl -sS "https://raw.githubusercontent.com/${github_user}/${github_repo}/${latest}/setup.sh" | BATTERY_REF="$latest" bash
 	exit 0
 fi
 
@@ -780,12 +855,23 @@ if [[ "$action" == "update_silent" ]]; then
 		exit 0
 	fi
 
-	# Try updating
-	if ! is_latest_version_installed; then
-		curl -sS "$github_url_update_sh" | bash
-		echo "✅ battery background script was updated to the latest version."
+	# Try updating: download the latest release and verify its checksum first.
+	latest="$(latest_release_tag)"
+	if [[ -z "$latest" ]]; then
+		echo "❌ Can't check for updates: no internet connection (or GitHub unreachable)."
+		exit 1
+	fi
+	if version_is_newer "$BATTERY_CLI_VERSION" "$latest"; then
+		tempfolder="$(mktemp -d)"
+		function cleanup() { rm -rf "$tempfolder"; }
+		trap cleanup EXIT
+		verified="$(download_verified_cli "$latest" "$tempfolder")" || exit 1
+		install -d -m 755 -o root -g wheel "$binfolder"
+		install -m 755 -o root -g wheel "$verified" "$battery_binary"
+		echo "✅ battery background script was updated to $latest."
+		rm -rf "$tempfolder"
 	else
-		echo "☑️  No updates found"
+		echo "☑️  No updates found (you have $BATTERY_CLI_VERSION, latest is $latest)"
 	fi
 
 	# Update the visudo configuration on each update ensuring that the latest version
@@ -813,11 +899,6 @@ if [[ "$action" == "update" ]]; then
 	# Remove this condition in future versions when you believe the old UI is not used anymore.
 	if [[ "$setting" == "silent" ]]; then
 		exit 0
-	fi
-
-	if ! curl -fsI "$github_url_battery_sh" &>/dev/null; then
-		echo "❌ Can't check for updates: no internet connection (or GitHub unreachable)."
-		exit 1
 	fi
 
 	# The code below repeats integrity checks from GUI app, specifically from
@@ -1236,28 +1317,9 @@ if [[ "$action" == "maintain" ]]; then
 	assert_not_running_as_root
 	warn_if_aldente_running
 
-	disable_discharging
-
-	# Kill old process silently
-	if test -f "$pidfile"; then
-		log "Killing old maintain process at $(cat $pidfile)"
-		pid=$(cat "$pidfile" 2>/dev/null)
-		kill $pid &>/dev/null
-	fi
-
-	stop_calibration
-
-	if [[ "$setting" == "stop" ]]; then
-		log "Killing running maintain daemons & enabling charging as default state"
-		rm $pidfile 2>/dev/null
-		rm -f "$topup_file"
-		$battery_binary disable_daemon
-		enable_charging
-		$battery_binary status
-		exit 0
-	fi
-
-	# Check if setting is a voltage
+	# Validate the setting BEFORE touching anything: an invalid setting must
+	# not kill the running limiter first (it used to, then exit with an error
+	# and leave the Mac unmaintained).
 	is_voltage=false
 	if valid_voltage "$setting"; then
 		setting="${setting//V/}"
@@ -1288,6 +1350,27 @@ if [[ "$action" == "maintain" ]]; then
 			exit 1
 		fi
 
+	fi
+
+	disable_discharging
+
+	# Kill old process silently
+	if test -f "$pidfile"; then
+		log "Killing old maintain process at $(cat $pidfile)"
+		pid=$(cat "$pidfile" 2>/dev/null)
+		kill $pid &>/dev/null
+	fi
+
+	stop_calibration
+
+	if [[ "$setting" == "stop" ]]; then
+		log "Killing running maintain daemons & enabling charging as default state"
+		rm $pidfile 2>/dev/null
+		rm -f "$topup_file"
+		$battery_binary disable_daemon
+		enable_charging
+		$battery_binary status
+		exit 0
 	fi
 
 	# Start maintenance script

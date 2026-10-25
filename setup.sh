@@ -66,13 +66,20 @@ function cleanup() { rm -rf "$tempfolder"; }
 trap cleanup EXIT
 
 echo "[  3 ] Downloading latest version of battery CLI"
-# Note: github names zips by <reponame>-<branchname>.replace( '/', '-' )
-update_branch="main"
-in_zip_folder_name="battery-$update_branch"
+# Which ref to install from: a release tag (vX.Y.Z) pins the install to that
+# release; "main" follows the branch. `battery reinstall` passes the latest
+# release tag. Overridable for testing via BATTERY_REF.
+update_ref="${BATTERY_REF:-main}"
+# Note: github names zips by <reponame>-<refname>.replace( '/', '-' )
+in_zip_folder_name="battery-$update_ref"
 batteryfolder="$tempfolder/battery"
 rm -rf $batteryfolder
 mkdir -p $batteryfolder
-curl -sSL -o $batteryfolder/repo.zip "https://github.com/Salcedoandrew/battery/archive/refs/heads/$update_branch.zip"
+if [[ "$update_ref" == v* ]]; then
+	curl -sSL -o $batteryfolder/repo.zip "https://github.com/Salcedoandrew/battery/archive/refs/tags/$update_ref.zip"
+else
+	curl -sSL -o $batteryfolder/repo.zip "https://github.com/Salcedoandrew/battery/archive/refs/heads/$update_ref.zip"
+fi
 unzip -qq $batteryfolder/repo.zip -d $batteryfolder
 cp -r $batteryfolder/$in_zip_folder_name/* $batteryfolder
 rm $batteryfolder/repo.zip

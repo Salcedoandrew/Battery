@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.1 (CLI)
+
+- **Safer updates.** `battery update` no longer runs code straight from the `main` branch. It downloads `battery.sh` from the latest GitHub release and checks its SHA-256 checksum before installing, and refuses to install if the checksum doesn't match. `battery reinstall` now reinstalls from the latest release tag instead of `main`. Publish the checksum with every release: `./scripts/publish-cli-assets.sh v1.5.1`.
+- **Check for updates.** `battery check-update` asks GitHub for the latest release and tells you if a newer version is out — it downloads nothing and changes nothing. The menu bar app's "Check for updates" item now runs this check inside the app and offers to install the update if there is one, instead of opening the releases page.
+- **Fixed:** the log no longer gets wiped when it grows past 5 MB (it now keeps the last 100 lines properly).
+- **Fixed:** a mistyped `battery maintain` setting (like `battery maintain 999`) no longer kills the running limiter before failing.
+
 ## v1.5.0 (CLI)
 
 - **Heat protection.** While battery is maintaining a limit, it pauses charging when the battery gets hotter than 35 °C and resumes once it has cooled 2 °C. Change the temperature with `battery heat 40`, or turn it off with `battery heat off`. `battery status` shows the battery temperature and whether charging is paused for heat. On Intel Macs the charge limit is held at the current level while hot, then restored.

@@ -1,5 +1,5 @@
 const { shell, app, Tray, Menu, powerMonitor, nativeTheme } = require( 'electron' )
-const { enable_battery_limiter, disable_battery_limiter, initialize_battery, is_limiter_enabled, get_battery_status, uninstall_battery, run_battery_command } = require( './battery' )
+const { enable_battery_limiter, disable_battery_limiter, initialize_battery, is_limiter_enabled, get_battery_status, uninstall_battery, run_battery_command, check_for_updates } = require( './battery' )
 const { log, confirm } = require( "./helpers" )
 const { get_logo_template } = require( './theme' )
 const { get_force_discharge_setting, update_force_discharge_setting } = require( './settings' )
@@ -97,7 +97,7 @@ const generate_app_menu = async () => {
                 submenu: [
                     {
                         label: `Check for updates`,
-                        click: () => shell.openExternal( `https://github.com/Salcedoandrew/battery/releases` )
+                        click: () => check_for_updates()
                     },
                     {
                         type: 'normal',

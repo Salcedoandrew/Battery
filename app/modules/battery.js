@@ -225,19 +225,16 @@ const initialize_battery = async () => {
                 app.exit()
             }
         } else {
-            // Try updating to the latest version
+            // Try updating to the latest version. The check asks GitHub for the
+            // latest release and compares it with the installed CLI, so a locally
+            // installed newer build is never downgraded. The install itself
+            // downloads the release and verifies its checksum first.
             if( !online ) return log( `Skipping battery update because we are offline` )
             if( skipupdate ) return log( `Skipping update due to environment variable` )
-            // Only update when GitHub has a newer CLI, so a locally installed newer build is never downgraded
-            const version_of = v => ( v.match( /v?(\d+)\.(\d+)\.(\d+)/ ) || [] ).slice( 1 ).map( Number )
-            const [ { stdout: local }, { stdout: remote } ] = await Promise.all( [
-                exec_async( `${ battery } version` ),
-                exec_async( `curl -fsS https://raw.githubusercontent.com/Salcedoandrew/battery/main/battery.sh | sed -n 's/^BATTERY_CLI_VERSION="\\(.*\\)"/\\1/p'` ).catch( () => ( { stdout: '' } ) )
-            ] )
-            const [ l, r ] = [ version_of( local ), version_of( remote ) ]
-            const remote_is_newer = r.length == 3 && ( l.length != 3 || r[0] - l[0] || r[1] - l[1] || r[2] - l[2] ) > 0
-            if( !remote_is_newer ) return log( `Skipping update: installed CLI ${ local.trim() }, GitHub ${ remote.trim() || 'unknown' }` )
-            log( `Updating battery...` )
+            const { stdout: check } = await exec_async( `${ battery } check-update` ).catch( () => ( { stdout: '' } ) )
+            const remote_match = check.match( /Update available: (v\d+\.\d+\.\d+)/ )
+            if( !remote_match ) return log( `Skipping update: ${ check.trim() || 'could not check' }` )
+            log( `Updating battery to ${ remote_match[1] }...` )
             try {
                 const result = await exec_async( `sudo -n ${ battery } update_silent` )
                 log( `Update details: `, result )
@@ -300,6 +297,34 @@ const run_battery_command = ( args, background=false ) => exec_async( background
         alert( `Battery error: ${ e.message }` )
     } )
 
+// Check for updates in the app, like alic: ask GitHub for the latest release,
+// show the result, and offer to install when one is available.
+const check_for_updates = async () => {
+
+    const output = await run_battery_command( 'check-update' )
+    if( !output ) return false
+
+    const match = output.match( /Update available: (v\d+\.\d+\.\d+)/ )
+    if( !match ) {
+        await alert( output )
+        return false
+    }
+
+    const install = await confirm( `${ output }\n\nInstall ${ match[1] } now?` )
+    if( !install ) return false
+
+    try {
+        await exec_async( `sudo -n ${ battery } update_silent` )
+        await alert( `Battery updated to ${ match[1] }.` )
+        return true
+    } catch ( e ) {
+        log( `Battery update failed: `, e )
+        await alert( `Couldn’t complete the update.\n\n${ e.message }` )
+        return false
+    }
+
+}
+
 module.exports = {
     run_battery_command,
     enable_battery_limiter,
@@ -307,5 +332,6 @@ module.exports = {
     initialize_battery,
     is_limiter_enabled,
     get_battery_status,
-    uninstall_battery
+    uninstall_battery,
+    check_for_updates
 }
