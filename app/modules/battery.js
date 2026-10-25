@@ -168,6 +168,16 @@ const log_err_return_false = ( ...errdata ) => {
     return false
 }
 
+// Latest release tag (e.g. v1.5.1) from the GitHub Releases API, or null
+// when GitHub can't be reached or the tag isn't a plain vX.Y.Z. Mirrors
+// latest_release_tag() in battery.sh. Reads the API, downloads nothing.
+const latest_release_tag = async () => {
+    const { stdout } = await exec_async( `curl -fsSL https://api.github.com/repos/Salcedoandrew/battery/releases/latest` ).catch( () => ( { stdout: '' } ) )
+    const match = stdout.match( /"tag_name":\s*"([^"]+)"/ )
+    const tag = match && match[1]
+    return /^v\d+\.\d+\.\d+$/.test( tag || '' ) ? tag : null
+}
+
 const initialize_battery = async () => {
 
     try {
@@ -215,9 +225,28 @@ const initialize_battery = async () => {
             if( !online ) return alert( `Battery needs an internet connection to download the latest version, please connect to the internet and open the app again.` )
             await alert( `Welcome to the Battery limiting tool. The app needs to install/update some components, so it will ask for your password. This should only be needed once.` )
             try {
-                const result = await exec_sudo_async( `curl -s https://raw.githubusercontent.com/Salcedoandrew/battery/main/setup.sh | bash -s -- $USER` )
-                log( `Install result success `, result )
-                await alert( `Battery background components installed/updated successfully. You can find the battery limiter icon in the top right of your menu bar.` )
+                // Fresh installs are pinned to the latest release: resolve
+                // the tag, download that release's setup.sh + checksum,
+                // verify it, and only then run it as root. Never fall back
+                // to main — an unverified install is worse than no install.
+                // setup.sh is then told the same tag (BATTERY_REF), so it
+                // installs the verified release assets too.
+                const tag = await latest_release_tag()
+                if( !tag ) throw new Error( `Could not determine the latest Battery release from GitHub. Please check your connection and open the app again.` )
+                log( `Installing battery ${ tag } for ${ USER }...` )
+                const { stdout: tmp } = await exec_async( `mktemp -d` )
+                const setup_dir = tmp.trim()
+                try {
+                    const setup_url = `https://github.com/Salcedoandrew/battery/releases/download/${ tag }`
+                    await exec_async( `curl -fsSL -o ${ setup_dir }/setup.sh ${ setup_url }/setup.sh` )
+                    await exec_async( `curl -fsSL -o ${ setup_dir }/setup.sh.sha256 ${ setup_url }/setup.sh.sha256` )
+                    await exec_async( `cd ${ setup_dir } && shasum -a 256 -c setup.sh.sha256` )
+                    const result = await exec_sudo_async( `BATTERY_REF=${ tag } bash ${ setup_dir }/setup.sh $USER` )
+                    log( `Install result success `, result )
+                    await alert( `Battery background components installed/updated successfully. You can find the battery limiter icon in the top right of your menu bar.` )
+                } finally {
+                    await exec_async( `rm -rf ${ setup_dir }` ).catch( () => {} )
+                }
             } catch ( e ) {
                 log( `Battery setup failed: `, e )
                 await alert( `Failed to install battery background components.\n\n${e.message}`)

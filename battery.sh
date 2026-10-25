@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.5.1"
+BATTERY_CLI_VERSION="v1.5.2"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -92,7 +92,7 @@ Usage:
     output logs of the battery CLI and GUI
     eg: battery logs 100
 
-  battery maintain PERCENTAGE[1-100,stop] or RANGE[lower-upper]
+  battery maintain PERCENTAGE[10-100,stop] or RANGE[lower-upper]
     reboot-persistent battery level maintenance: turn off charging above, and on below a certain value
     it has the option of a --force-discharge flag that discharges even when plugged in (this does NOT work well with clamshell mode)
     eg: battery maintain 80           # maintain at 80%
@@ -130,11 +130,11 @@ Usage:
     eg: battery topup
     eg: battery topup stop
 
-  battery charge LEVEL[1-100]
+  battery charge LEVEL[10-100]
     charge the battery to a certain percentage; battery maintenance is restored upon completion
     eg: battery charge 90
 
-  battery discharge LEVEL[1-100]
+  battery discharge LEVEL[10-100]
     block adapter power until the battery reaches the specified level; battery maintenance is restored upon completion
     eg: battery discharge 90
 
@@ -203,7 +203,11 @@ function log() {
 }
 
 function valid_percentage() {
-	if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 0 ]] || [[ "$1" -gt 100 ]]; then
+	# 10-100, aligned with valid_percentage_range (whose lower bound must
+	# be at least 10): 0 is not a maintainable level (maintain 0 would
+	# disable charging immediately and forever). Calibration discharges to
+	# 15%, so the floor cannot be higher than that.
+	if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 10 ]] || [[ "$1" -gt 100 ]]; then
 		return 1
 	else
 		return 0
@@ -246,13 +250,39 @@ function valid_voltage() {
 }
 
 function smc_read_hex() {
-	key=$1
-	line=$(echo $($smc_binary -k $key -r))
-	if [[ $line =~ "no data" ]]; then
+	local key=$1
+	local line
+	# A failed smc read is not data: exit non-zero and print nothing, so
+	# callers see "unknown" instead of parsing the error text as a value
+	# (an smc error used to read as "disabled" charging).
+	if ! line=$($smc_binary -k "$key" -r 2>/dev/null); then
 		echo
-	else
-		echo ${line#*bytes} | tr -d ' ' | tr -d ')'
+		return 1
 	fi
+	if [[ "$line" =~ "no data" || "$line" =~ "Error" ]]; then
+		echo
+		return 1
+	fi
+	# Only well-formed hex is a reading; anything else is an error in disguise.
+	local hex
+	hex=$(echo "${line#*bytes}" | tr -d ' ' | tr -d ')')
+	if [[ -z "$hex" || ! "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
+		echo
+		return 1
+	fi
+	echo "$hex"
+}
+
+# smc_has_key KEY — true when the SMC binary reads KEY successfully.
+# Checks the exit code and rejects error output, instead of regexing raw
+# output (an smc failure used to look like a supported key).
+function smc_has_key() {
+	local output
+	if ! output=$($smc_binary -k "$1" -r 2>/dev/null); then
+		return 1
+	fi
+	[[ "$output" =~ "no data" || "$output" =~ "Error" ]] && return 1
+	return 0
 }
 
 function smc_write_hex() {
@@ -268,12 +298,12 @@ function smc_write_hex() {
 ## #########################
 ## Detect supported SMC keys
 ## #########################
-[[ $($smc_binary -k CHTE -r) =~ "no data" ]] && smc_supports_tahoe=false || smc_supports_tahoe=true;
-[[ $($smc_binary -k CH0B -r) =~ "no data" ]] && smc_supports_legacy=false || smc_supports_legacy=true;
-[[ $($smc_binary -k CHIE -r) =~ "no data" ]] && smc_supports_adapter_chie=false || smc_supports_adapter_chie=true;
-[[ $($smc_binary -k CH0I -r) =~ "no data" ]] && smc_supports_adapter_ch0i=false || smc_supports_adapter_ch0i=true;
-[[ $($smc_binary -k CH0J -r) =~ "no data" || $($smc_binary -k CH0J -r) =~ "Error" ]] && smc_supports_adapter_ch0j=false || smc_supports_adapter_ch0j=true;
-[[ $($smc_binary -k BCLM -r) =~ "no data" ]] && smc_supports_bclm=false || smc_supports_bclm=true;
+smc_has_key CHTE && smc_supports_tahoe=true || smc_supports_tahoe=false
+smc_has_key CH0B && smc_supports_legacy=true || smc_supports_legacy=false
+smc_has_key CHIE && smc_supports_adapter_chie=true || smc_supports_adapter_chie=false
+smc_has_key CH0I && smc_supports_adapter_ch0i=true || smc_supports_adapter_ch0i=false
+smc_has_key CH0J && smc_supports_adapter_ch0j=true || smc_supports_adapter_ch0j=false
+smc_has_key BCLM && smc_supports_bclm=true || smc_supports_bclm=false
 # Intel Macs only have the firmware charge limit key BCLM: use it when the Apple Silicon charging keys are missing
 [[ "$smc_supports_tahoe" == "false" && "$smc_supports_legacy" == "false" && "$smc_supports_bclm" == "true" ]] && smc_uses_bclm=true || smc_uses_bclm=false
 [[ "$smc_supports_adapter_chie" == "true" || "$smc_supports_adapter_ch0i" == "true" || "$smc_supports_adapter_ch0j" == "true" ]] && smc_supports_discharge=true || smc_supports_discharge=false
@@ -282,13 +312,19 @@ function log_smc_capabilities() {
 	log "SMC capabilities: tahoe=$smc_supports_tahoe legacy=$smc_supports_legacy BCLM=$smc_supports_bclm CHIE=$smc_supports_adapter_chie CH0I=$smc_supports_adapter_ch0i CH0J=$smc_supports_adapter_ch0j"
 }
 
-# Set the Intel firmware charge limit (BCLM, one byte, 20-100%)
+# Set the Intel firmware charge limit (BCLM, one byte, 20-100%).
+# Returns non-zero when the write fails, so callers never report success
+# for a limit that did not stick.
 function set_bclm_limit() {
 	local limit=$1
 	((limit < 20)) && limit=20
 	((limit > 100)) && limit=100
 	log "🔋 Setting firmware charge limit (BCLM) to $limit%"
-	smc_write_hex BCLM "$(printf %02x "$limit")"
+	if ! smc_write_hex BCLM "$(printf %02x "$limit")"; then
+		log "❌ Failed to set firmware charge limit (BCLM) to $limit%"
+		return 1
+	fi
+	return 0
 }
 
 function get_bclm_limit() {
@@ -350,13 +386,108 @@ function is_fully_charged() {
 	ioreg -rn AppleSmartBattery | grep -q '"FullyCharged" = Yes' || [[ "$(get_battery_percentage)" -ge 100 ]]
 }
 
+# pid_is_alive PID — true when PID exists and is not a zombie (a zombie is
+# already dead, waiting to be reaped; waiting on it would hang the stop).
+function pid_is_alive() {
+	local pid=$1
+	kill -0 "$pid" 2>/dev/null || return 1
+	[[ "$(ps -o stat= -p "$pid" 2>/dev/null)" =~ Z ]] && return 1
+	return 0
+}
+
+# is_battery_pid PID KIND — true when PID is a battery process of KIND
+# ("maintain": a synchronous maintain loop; "calibrate": a calibration run).
+# The command line must contain the battery binary running that action: a
+# stale pidfile whose PID was recycled by an unrelated process must never
+# match. The match is not start-anchored: the kernel runs the script via
+# its shebang, so the command line starts with the interpreter
+# ("/bin/bash /usr/local/co.palokaj.battery/battery maintain_...").
+function is_battery_pid() {
+	local pid=$1 kind=$2
+	local cmdline
+	cmdline=$(ps -o args= -p "$pid" 2>/dev/null)
+	case "$kind" in
+		maintain)
+			case "$cmdline" in
+				*"$battery_binary maintain_synchronous"*|*"$battery_binary maintain_voltage_synchronous"*) return 0 ;;
+			esac
+			;;
+		calibrate)
+			case "$cmdline" in
+				*"$battery_binary calibrate"*) return 0 ;;
+			esac
+			;;
+	esac
+	return 1
+}
+
+# stop_verified_pid PID KIND — stop a battery process, verified at every
+# step. Only signals a PID that is alive and is really a battery process
+# of KIND (see is_battery_pid): a stale pidfile never kills an unrelated
+# process. SIGTERM first, wait up to ~5 seconds, then SIGKILL, and return
+# non-zero (with a loud log) when the process will not die. Returns 0 when
+# there was nothing to stop (dead PID, a stale PID that is not ours, or
+# this process itself).
+function stop_verified_pid() {
+	local pid=$1 kind=$2
+	[[ -n "$pid" ]] || return 0
+	if [[ "$pid" == "$$" ]]; then
+		log "⚠️ Not stopping PID $pid: it is this process"
+		return 0
+	fi
+	if ! pid_is_alive "$pid"; then
+		return 0
+	fi
+	if ! is_battery_pid "$pid" "$kind"; then
+		log "⚠️ Not stopping PID $pid: it is not a battery $kind process (\"$(ps -o args= -p "$pid" 2>/dev/null)\")"
+		return 0
+	fi
+	kill "$pid" 2>/dev/null
+	local waited=0
+	while pid_is_alive "$pid" && ((waited < 10)); do
+		sleep 0.5
+		((waited++))
+	done
+	if pid_is_alive "$pid"; then
+		log "⚠️ PID $pid did not exit, sending SIGKILL"
+		kill -9 "$pid" 2>/dev/null
+		sleep 1
+	fi
+	if pid_is_alive "$pid"; then
+		log "❌ PID $pid will not die, refusing to report success"
+		return 1
+	fi
+	return 0
+}
+
+# stop_maintain_loops_by_command — stop maintain loops found by their exact
+# command line, for when there is no pidfile (e.g. a loop started by launchd
+# before this version wrote one). pgrep only nominates candidates; each one
+# is verified by stop_verified_pid before it is signalled. Returns non-zero
+# when a loop will not die.
+function stop_maintain_loops_by_command() {
+	local pid failed=0
+	for pid in $(pgrep -f "maintain_synchronous" 2>/dev/null; pgrep -f "maintain_voltage_synchronous" 2>/dev/null); do
+		stop_verified_pid "$pid" "maintain" || failed=1
+	done
+	return $failed
+}
+
 # Stop a running calibration, including the charge/discharge helper it started
 function stop_calibration() {
 	test -f "$calibrate_pidfile" || return 0
-	local pid=$(cat "$calibrate_pidfile" 2>/dev/null)
+	local pid
+	pid=$(cat "$calibrate_pidfile" 2>/dev/null)
 	if [[ -n "$pid" ]]; then
-		pkill -P "$pid" &>/dev/null
-		kill "$pid" &>/dev/null
+		# Only the children of a real battery calibrate process may be
+		# killed: a stale pidfile must never touch an unrelated process.
+		if is_battery_pid "$pid" "calibrate"; then
+			pkill -P "$pid" &>/dev/null
+		fi
+		if ! stop_verified_pid "$pid" "calibrate"; then
+			log "❌ Calibration process $pid will not die"
+			return 1
+		fi
 	fi
 	rm -f "$calibrate_pidfile"
 	log "🚨 Calibration process have been stopped"
@@ -398,13 +529,14 @@ function enable_discharging() {
 	fi
 	log "🔽🪫 Enabling battery discharging"
 	if [[ "$smc_supports_adapter_chie" == "true" ]]; then
-		smc_write_hex CHIE 08
+		smc_write_hex CHIE 08 || { log "❌ Failed to enable discharging (CHIE)"; return 1; }
 	elif [[ "$smc_supports_adapter_ch0j" == "true" ]]; then
-		smc_write_hex CH0J 01
+		smc_write_hex CH0J 01 || { log "❌ Failed to enable discharging (CH0J)"; return 1; }
 	else
-		smc_write_hex CH0I 01
+		smc_write_hex CH0I 01 || { log "❌ Failed to enable discharging (CH0I)"; return 1; }
 	fi
-	sudo $smc_binary -k ACLC -w 01
+	smc_write_hex ACLC 01 || { log "❌ Failed to set MagSafe LED (ACLC) while enabling discharging"; return 1; }
+	return 0
 }
 
 function disable_discharging() {
@@ -412,13 +544,13 @@ function disable_discharging() {
 	[[ "$smc_supports_discharge" == "false" ]] && return
 	log "🔼🪫 Disabling battery discharging"
 	if [[ "$smc_supports_adapter_chie" == "true" ]]; then
-		smc_write_hex CHIE 00
+		smc_write_hex CHIE 00 || { log "❌ Failed to disable discharging (CHIE)"; return 1; }
 	elif [[ "$smc_supports_adapter_ch0j" == "true" ]]; then
-		smc_write_hex CH0J 00
+		smc_write_hex CH0J 00 || { log "❌ Failed to disable discharging (CH0J)"; return 1; }
 	elif [[ "$smc_supports_adapter_ch0i" == "true" ]]; then
-		smc_write_hex CH0I 00
+		smc_write_hex CH0I 00 || { log "❌ Failed to disable discharging (CH0I)"; return 1; }
 	else
-		smc_write_hex CH0I 00
+		smc_write_hex CH0I 00 || { log "❌ Failed to disable discharging (CH0I)"; return 1; }
 	fi
 	# Keep track of status
 	is_charging=$(get_smc_charging_status)
@@ -432,19 +564,20 @@ function disable_discharging() {
 		log "Disabling discharging: No valid maintain percentage set, enabling charging"
 		# use direct commands since enable_charging also calls disable_discharging, and causes an eternal loop
 		if [[ "$smc_supports_tahoe" == "true" ]]; then
-			smc_write_hex CHTE 00000000
+			smc_write_hex CHTE 00000000 || { log "❌ Failed to enable charging (CHTE)"; return 1; }
 		elif [[ "$smc_supports_legacy" == "true" ]]; then
-			smc_write_hex CH0B 00
-			smc_write_hex CH0C 00
+			smc_write_hex CH0B 00 || { log "❌ Failed to enable charging (CH0B)"; return 1; }
+			smc_write_hex CH0C 00 || { log "❌ Failed to enable charging (CH0C)"; return 1; }
 		else
 			log "⚠️ Unable to reset charging state"
+			return 1
 		fi
 		change_magsafe_led_color "orange"
 
 	elif [[ "$battery_percentage" -ge "$target" && "$is_charging" == "enabled" ]]; then
 
 		log "Disabling discharging: Charge above $target, disabling charging"
-		disable_charging
+		disable_charging || { log "❌ Failed to disable charging"; return 1; }
 		change_magsafe_led_color "green"
 
 	elif [[ "$battery_percentage" -lt "$target" && "$is_charging" == "disabled" ]]; then
@@ -452,12 +585,13 @@ function disable_discharging() {
 		log "Disabling discharging: Charge below $target, enabling charging"
 		# use direct commands since enable_charging also calls disable_discharging, and causes an eternal loop
 		if [[ "$smc_supports_tahoe" == "true" ]]; then
-			smc_write_hex CHTE 00000000
+			smc_write_hex CHTE 00000000 || { log "❌ Failed to enable charging (CHTE)"; return 1; }
 		elif [[ "$smc_supports_legacy" == "true" ]]; then
-			smc_write_hex CH0B 00
-			smc_write_hex CH0C 00
+			smc_write_hex CH0B 00 || { log "❌ Failed to enable charging (CH0B)"; return 1; }
+			smc_write_hex CH0C 00 || { log "❌ Failed to enable charging (CH0C)"; return 1; }
 		else
 			log "⚠️ Unable to reset charging state"
+			return 1
 		fi
 		change_magsafe_led_color "orange"
 
@@ -472,14 +606,15 @@ function disable_discharging() {
 function enable_charging() {
 	log "🔌🔋 Enabling battery charging"
 	if [[ "$smc_supports_tahoe" == "true" ]]; then
-		smc_write_hex CHTE 00000000
+		smc_write_hex CHTE 00000000 || { log "❌ Failed to enable charging (CHTE)"; return 1; }
 	elif [[ "$smc_supports_legacy" == "true" ]]; then
-		smc_write_hex CH0B 00
-		smc_write_hex CH0C 00
+		smc_write_hex CH0B 00 || { log "❌ Failed to enable charging (CH0B)"; return 1; }
+		smc_write_hex CH0C 00 || { log "❌ Failed to enable charging (CH0C)"; return 1; }
 	elif [[ "$smc_uses_bclm" == "true" ]]; then
-		set_bclm_limit 100
+		set_bclm_limit 100 || return 1
 	else
 		log "⚠️ Unable to determine SMC keys for enabling charging"
+		return 1
 	fi
 	disable_discharging
 }
@@ -487,16 +622,48 @@ function enable_charging() {
 function disable_charging() {
 	log "🔌🪫 Disabling battery charging"
 	if [[ "$smc_supports_tahoe" == "true" ]]; then
-		smc_write_hex CHTE 01000000
+		smc_write_hex CHTE 01000000 || { log "❌ Failed to disable charging (CHTE)"; return 1; }
 	elif [[ "$smc_supports_legacy" == "true" ]]; then
-		smc_write_hex CH0B 02
-		smc_write_hex CH0C 02
+		smc_write_hex CH0B 02 || { log "❌ Failed to disable charging (CH0B)"; return 1; }
+		smc_write_hex CH0C 02 || { log "❌ Failed to disable charging (CH0C)"; return 1; }
 	elif [[ "$smc_uses_bclm" == "true" ]]; then
 		# Intel: cap the firmware limit at the current level so it stops charging
-		set_bclm_limit "$(get_battery_percentage)"
+		set_bclm_limit "$(get_battery_percentage)" || return 1
 	else
 		log "⚠️ Unable to determine SMC keys for disabling charging"
+		return 1
 	fi
+}
+
+# Whether the SMC has ever been driven successfully by this process.
+# A maintain loop uses it to tell a dead SMC (first write fails: abort)
+# from a transient failure later (log and retry next minute).
+smc_proven=false
+
+# apply_charging_state enable|disable — drive charging once. The first
+# charging write proves the SMC can be driven; if it fails, the process
+# exits 1 instead of looping forever on a dead SMC. Later failures only
+# log; the maintain loop retries them next minute. Returns 0 on success,
+# 1 when a later write failed.
+function apply_charging_state() {
+	local action=$1
+	if [[ "$action" == "disable" ]]; then
+		if disable_charging; then
+			smc_proven=true
+			return 0
+		fi
+	else
+		if enable_charging; then
+			smc_proven=true
+			return 0
+		fi
+	fi
+	if [[ "$smc_proven" == "true" ]]; then
+		log "⚠️ Failed to $action charging, will retry next minute"
+		return 1
+	fi
+	log "❌ First charging write failed, stopping maintenance"
+	exit 1
 }
 
 function get_smc_charging_status() {
@@ -730,6 +897,29 @@ function download_verified_cli() {
 	return 0
 }
 
+# Download setup.sh and its checksum for release tag $1 into directory $2,
+# verify the SHA-256, and print the path to the verified script.
+# Refuses (exit 1) when anything fails to download or the checksum doesn't
+# match. Same pattern as download_verified_cli, for setup.sh.
+function download_verified_setup() {
+	local tag="$1" dir="$2"
+	local script_url="${github_release_download}/${tag}/setup.sh"
+	if ! curl -fsSL -o "$dir/setup.sh" "$script_url"; then
+		echo "❌ Failed to download setup.sh for $tag."
+		return 1
+	fi
+	if ! curl -fsSL -o "$dir/setup.sh.sha256" "${script_url}.sha256"; then
+		echo "❌ Failed to download the checksum for $tag. Refusing to run an unverified setup script."
+		return 1
+	fi
+	if ! (cd "$dir" && shasum -a 256 -c setup.sh.sha256 >/dev/null 2>&1); then
+		echo "❌ Checksum mismatch for setup.sh $tag. Refusing to run it."
+		return 1
+	fi
+	echo "$dir/setup.sh"
+	return 0
+}
+
 ## ###############
 ## Actions
 ## ###############
@@ -841,7 +1031,15 @@ if [[ "$action" == "reinstall" ]]; then
 		echo "Press any key to continue"
 		read
 	fi
-	curl -sS "https://raw.githubusercontent.com/${github_user}/${github_repo}/${latest}/setup.sh" | BATTERY_REF="$latest" bash
+	# Never pipe an unverified script into bash: download setup.sh and its
+	# published checksum from the release, verify, then run the local file.
+	# (On failure the helper's error is captured in $verified_setup, so
+	# print it: without this the reinstall would exit 1 silently.)
+	tempfolder="$(mktemp -d)"
+	function cleanup() { rm -rf "$tempfolder"; }
+	trap cleanup EXIT
+	verified_setup="$(download_verified_setup "$latest" "$tempfolder")" || { echo "$verified_setup"; exit 1; }
+	BATTERY_REF="$latest" bash "$verified_setup"
 	exit 0
 fi
 
@@ -968,14 +1166,16 @@ if [[ "$action" == "charging" ]]; then
 	log "Setting $action to $setting"
 	warn_if_aldente_running
 
-	# Disable running daemon
-	$battery_binary maintain stop
+	# Disable running maintenance first: a loop that is still alive would
+	# undo the charging change within a minute, so a failed stop is fatal.
+	$battery_binary maintain stop || { log "❌ Could not stop maintenance, not changing the charging state"; exit 1; }
 
-	# Set charging to on and off
+	# Set charging to on and off; a failed SMC write must exit non-zero
+	# instead of reporting success.
 	if [[ "$setting" == "on" ]]; then
-		enable_charging
+		enable_charging || { log "❌ Failed to enable charging"; exit 1; }
 	elif [[ "$setting" == "off" ]]; then
-		disable_charging
+		disable_charging || { log "❌ Failed to disable charging"; exit 1; }
 	else
 		log "Error: $setting is not \"on\" or \"off\"."
 		exit 1
@@ -999,14 +1199,16 @@ if [[ "$action" == "adapter" ]]; then
 		exit 0
 	fi
 
-	# Disable running daemon
-	$battery_binary maintain stop
+	# Disable running maintenance first: a loop that is still alive would
+	# fight the adapter change, so a failed stop is fatal.
+	$battery_binary maintain stop || { log "❌ Could not stop maintenance, not changing the adapter state"; exit 1; }
 
-	# Set charging to on and off
+	# Set adapter state; a failed SMC write must exit non-zero instead of
+	# reporting success.
 	if [[ "$setting" == "on" ]]; then
-		disable_discharging
+		disable_discharging || { log "❌ Failed to reconnect the adapter"; exit 1; }
 	elif [[ "$setting" == "off" ]]; then
-		enable_discharging
+		enable_discharging || { log "❌ Failed to disconnect the adapter"; exit 1; }
 	else
 		log "Error: $setting is not \"on\" or \"off\"."
 		exit 1
@@ -1020,19 +1222,20 @@ fi
 if [[ "$action" == "charge" ]]; then
 
 	if ! valid_percentage "$setting"; then
-		log "Error: $setting is not a valid setting for battery charge. Please use a number between 0 and 100"
+		log "Error: $setting is not a valid setting for battery charge. Please use a number between 10 and 100"
 		exit 1
 	fi
 
 	# Stop battery maintenance if invoked by user from Terminal
 	if [[ "$BATTERY_HELPER_MODE" != "1" ]]; then
-		$battery_binary maintain stop
+		$battery_binary maintain stop || { log "❌ Could not stop maintenance, not starting to charge"; exit 1; }
 	fi
 
-	# Start charging
+	# Start charging; a failed write must exit non-zero instead of looping
+	# forever waiting for a level that will never rise.
 	battery_percentage=$(get_battery_percentage)
 	log "Charging to $setting% from $battery_percentage%"
-	enable_charging # also disables discharging
+	enable_charging || { log "❌ Failed to enable charging"; exit 1; } # also disables discharging
 
 	# Loop until battery charging level is reached
 	while [[ "$battery_percentage" -lt "$setting" ]]; do
@@ -1047,14 +1250,23 @@ if [[ "$action" == "charge" ]]; then
 
 	done
 
-	disable_charging
-	log "Charging completed at $battery_percentage%"
+	# Stop charging at the target; if the write fails, charging continues
+	# past the target, so fail loudly — but still try to restore
+	# maintenance below before exiting.
+	charge_failed=false
+	disable_charging || { log "❌ Failed to stop charging at $setting%, charging continues past the target"; charge_failed=true; }
+	if [[ "$charge_failed" == "true" ]]; then
+		log "Charging did not stop at $battery_percentage%"
+	else
+		log "Charging completed at $battery_percentage%"
+	fi
 
 	# Try restoring maintenance if invoked by user from Terminal
 	if [[ "$BATTERY_HELPER_MODE" != "1" ]]; then
 		$battery_binary maintain recover
 	fi
 
+	[[ "$charge_failed" == "true" ]] && exit 1
 	exit 0
 
 fi
@@ -1063,7 +1275,7 @@ fi
 if [[ "$action" == "discharge" ]]; then
 
 	if ! valid_percentage "$setting"; then
-		log "Error: $setting is not a valid setting for battery discharge. Please use a number between 0 and 100"
+		log "Error: $setting is not a valid setting for battery discharge. Please use a number between 10 and 100"
 		exit 1
 	fi
 
@@ -1074,13 +1286,14 @@ if [[ "$action" == "discharge" ]]; then
 
 	# Stop battery maintenance if invoked by user from Terminal
 	if [[ "$BATTERY_HELPER_MODE" != "1" ]]; then
-		$battery_binary maintain stop
+		$battery_binary maintain stop || { log "❌ Could not stop maintenance, not starting to discharge"; exit 1; }
 	fi
 
-	# Start discharging
+	# Start discharging; a failed write must exit non-zero instead of
+	# looping forever waiting for a level that will never drop.
 	battery_percentage=$(get_battery_percentage)
 	log "Discharging to $setting% from $battery_percentage%"
-	enable_discharging
+	enable_discharging || { log "❌ Failed to enable discharging"; exit 1; }
 
 	# Loop until battery charging level is reached
 	while [[ "$battery_percentage" -gt "$setting" ]]; do
@@ -1091,14 +1304,23 @@ if [[ "$action" == "discharge" ]]; then
 
 	done
 
-	disable_discharging
-	log "Discharging completed at $battery_percentage%"
+	# Stop discharging at the target; if the write fails, the adapter stays
+	# disconnected after the command "completes", so fail loudly — but
+	# still try to restore maintenance below before exiting.
+	discharge_failed=false
+	disable_discharging || { log "❌ Failed to stop discharging at $setting%, the adapter stays disconnected"; discharge_failed=true; }
+	if [[ "$discharge_failed" == "true" ]]; then
+		log "Discharging did not stop at $battery_percentage%"
+	else
+		log "Discharging completed at $battery_percentage%"
+	fi
 
 	# Try restoring maintenance if invoked by user from Terminal
 	if [[ "$BATTERY_HELPER_MODE" != "1" ]]; then
 		$battery_binary maintain recover
 	fi
 
+	[[ "$discharge_failed" == "true" ]] && exit 1
 	exit 0
 
 fi
@@ -1143,7 +1365,7 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 		lower_bound="$setting"
 		upper_bound="$setting"
 	else
-		log "Error: $setting is not a valid setting for battery maintain. Please use a number between 0 and 100, or a range like 70-80"
+		log "Error: $setting is not a valid setting for battery maintain. Please use a number between 10 and 100, or a range like 70-80"
 		exit 1
 	fi
 
@@ -1158,13 +1380,19 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 		log "Not triggering discharge as it is not requested"
 	fi
 
+	# This process owns the pidfile from here on (also when started at login
+	# by launchd, which writes no pidfile itself), and exits once 'maintain
+	# stop' or a new 'maintain' replaces it, so a stale loop can never
+	# re-apply an old limit.
+	echo $$ >"$pidfile"
+
 	# Intel: the firmware holds the limit itself, so write BCLM once instead of toggling charging.
 	# BCLM can reset on reboot/wake, so check it every minute and re-apply only if it changed.
-	# This process owns the pidfile (also when started at login), and exits once 'maintain stop' or a
-	# new 'maintain' replaces it, so a stale loop can never re-apply an old limit.
 	if [[ "$smc_uses_bclm" == "true" ]]; then
-		echo $$ >"$pidfile"
 		log "Maintaining battery at $upper_bound% via the firmware charge limit (BCLM)"
+		# The first limit write proves the SMC can be driven; if it fails,
+		# abort instead of looping forever on a dead SMC.
+		set_bclm_limit "$upper_bound" || { log "❌ First charge-limit write failed, stopping maintenance"; exit 1; }
 		heat_state=ok
 		while [[ "$(cat "$pidfile" 2>/dev/null)" == "$$" ]]; do
 			target=$upper_bound
@@ -1205,9 +1433,19 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 		log "Charging to and maintaining at $setting% from $battery_percentage%"
 	fi
 
-	# Loop until battery percent is exceeded
+	# The SMC must be readable before the loop starts: a loop that cannot
+	# see the charging state cannot change it either.
+	if [[ "$(get_smc_charging_status)" == "unknown" ]]; then
+		log "❌ Cannot read the charging state from SMC, stopping maintenance"
+		exit 1
+	fi
+
+	# Loop until battery percent is exceeded. The loop owns the pidfile:
+	# it exits as soon as the pidfile no longer holds its own PID, so a
+	# 'maintain stop' (or a new 'maintain') retires it even if the kill
+	# that was supposed to stop it missed.
 	heat_state=ok
-	while true; do
+	while [[ "$(cat "$pidfile" 2>/dev/null)" == "$$" ]]; do
 
 		# Keep track of status
 		is_charging=$(get_smc_charging_status)
@@ -1233,20 +1471,20 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 
 		if [[ "$heat_state" == "hot" ]]; then
 
-			[[ "$is_charging" == "enabled" ]] && disable_charging
+			[[ "$is_charging" == "enabled" ]] && apply_charging_state disable
 
 		elif [[ "$battery_percentage" -ge "$upper" && ("$is_charging" == "enabled" || "$ac_attached" == "1") ]]; then
 
 			log "Charge at or above $upper%"
 			if [[ "$is_charging" == "enabled" ]]; then
-				disable_charging
+				apply_charging_state disable
 			fi
 			change_magsafe_led_color "green"
 
 		elif [[ "$battery_percentage" -lt "$lower" && "$is_charging" == "disabled" ]]; then
 
 			log "Charge below $lower%"
-			enable_charging
+			apply_charging_state enable
 			change_magsafe_led_color "orange"
 
 		fi
@@ -1257,6 +1495,7 @@ if [[ "$action" == "maintain_synchronous" ]]; then
 
 	done
 
+	log "Maintenance was stopped or replaced, exiting"
 	exit 0
 
 fi
@@ -1283,22 +1522,36 @@ if [[ "$action" == "maintain_voltage_synchronous" ]]; then
 		fi
 	fi
 
+	# This process owns the pidfile from here on (also when started at login
+	# by launchd, which writes no pidfile itself), and exits once 'maintain
+	# stop' or a new 'maintain' replaces it.
+	echo $$ >"$pidfile"
+
 	voltage=$(get_voltage)
 	lower_voltage=$(echo "$setting - $subsetting" | bc -l)
 	upper_voltage=$(echo "$setting + $subsetting" | bc -l)
 	log "Keeping voltage between ${lower_voltage}V and ${upper_voltage}V"
 
-	# Loop
-	while true; do
+	# The SMC must be readable before the loop starts: a loop that cannot
+	# see the charging state cannot change it either.
+	if [[ "$(get_smc_charging_status)" == "unknown" ]]; then
+		log "❌ Cannot read the charging state from SMC, stopping maintenance"
+		exit 1
+	fi
+
+	# Loop. It exits as soon as the pidfile no longer holds its own PID, so
+	# a 'maintain stop' (or a new 'maintain') retires it even if the kill
+	# that was supposed to stop it missed.
+	while [[ "$(cat "$pidfile" 2>/dev/null)" == "$$" ]]; do
 		is_charging=$(get_smc_charging_status)
 
 		if (($(echo "$voltage < $lower_voltage" | bc -l))) && [[ "$is_charging" == "disabled" ]]; then
 			log "Battery at ${voltage}V"
-			enable_charging
+			apply_charging_state enable
 		fi
 		if (($(echo "$voltage >= $upper_voltage" | bc -l))) && [[ "$is_charging" == "enabled" ]]; then
 			log "Battery at ${voltage}V"
-			disable_charging
+			apply_charging_state disable
 		fi
 
 		sleep 60
@@ -1307,6 +1560,7 @@ if [[ "$action" == "maintain_voltage_synchronous" ]]; then
 
 	done
 
+	log "Maintenance was stopped or replaced, exiting"
 	exit 0
 
 fi
@@ -1346,44 +1600,101 @@ if [[ "$action" == "maintain" ]]; then
 		log "Called with $setting $action"
 		# If setting is not a valid percentage/range and not a special keyword, exit with an error.
 		if ! { [[ "$setting" == "stop" ]] || [[ "$setting" == "recover" ]]; }; then
-			log "Error: $setting is not a valid setting for battery maintain. Please use a number between 0 and 100, a range like 70-80, or an action keyword like 'stop' or 'recover'."
+			log "Error: $setting is not a valid setting for battery maintain. Please use a number between 10 and 100, a range like 70-80, or an action keyword like 'stop' or 'recover'."
 			exit 1
 		fi
 
 	fi
 
+	# Intel firmware limit (BCLM) cannot go below 20%: a lower maintain
+	# level would be clamped to 20% by set_bclm_limit while claiming a
+	# lower one. Reject it here instead of reporting success for a limit
+	# that cannot be kept. (On Intel the maintained level is the upper
+	# bound of a range; the lower bound only decides when charging resumes
+	# on Apple Silicon, so only the upper bound is checked.)
+	if [[ "$smc_uses_bclm" == "true" && "$setting" != "stop" && "$setting" != "recover" && "$is_voltage" == "false" ]]; then
+		if valid_percentage_range "$setting"; then
+			if [[ "${setting#*-}" -lt 20 ]]; then
+				log "Error: the Intel firmware charge limit (BCLM) cannot go below 20%; ${setting#*-}% is not maintainable on this Mac"
+				exit 1
+			fi
+		elif valid_percentage "$setting"; then
+			if [[ "$setting" -lt 20 ]]; then
+				log "Error: the Intel firmware charge limit (BCLM) cannot go below 20%; $setting% is not maintainable on this Mac"
+				exit 1
+			fi
+		fi
+	fi
+
 	disable_discharging
 
-	# Kill old process silently
+	# Stop any running maintain loop first: only signal a PID that is alive
+	# and is really the battery maintain loop (see stop_verified_pid), and
+	# wait for it to die. A stale pidfile never kills an unrelated process.
+	# If the loop will not die, a new 'maintain' still proceeds (the new
+	# pidfile retires the old loop at its next check), but 'maintain stop'
+	# fails instead of reporting success.
+	old_loop_ok=true
 	if test -f "$pidfile"; then
-		log "Killing old maintain process at $(cat $pidfile)"
 		pid=$(cat "$pidfile" 2>/dev/null)
-		kill $pid &>/dev/null
+		if [[ -n "$pid" ]]; then
+			log "Stopping old maintain process $pid"
+			stop_verified_pid "$pid" "maintain" || old_loop_ok=false
+		fi
+	else
+		# No pidfile (e.g. a loop started by launchd before this version
+		# wrote one): find it by its exact command line instead.
+		stop_maintain_loops_by_command || old_loop_ok=false
 	fi
 
 	stop_calibration
 
 	if [[ "$setting" == "stop" ]]; then
-		log "Killing running maintain daemons & enabling charging as default state"
-		rm $pidfile 2>/dev/null
-		rm -f "$topup_file"
+		log "Stopping battery maintenance and enabling charging as default state"
+		if [[ "$old_loop_ok" != "true" ]]; then
+			# The loop is still alive: enabling charging now would be undone
+			# by it. Remove the pidfile so it retires at its next check,
+			# and fail loudly instead of reporting success.
+			rm -f "$pidfile"
+			log "❌ Could not stop the running maintain loop"
+			exit 1
+		fi
+		rm -f "$pidfile" "$topup_file"
 		$battery_binary disable_daemon
-		enable_charging
+		# Enabling charging may fail (dead SMC); the verification below is
+		# the arbiter, so a failed write is logged, not fatal by itself.
+		enable_charging || log "⚠️ Failed to enable charging, verifying state anyway"
+		# Verify before reporting success: the loop is gone (checked above)
+		# and charging is actually enabled again.
+		if [[ "$(get_smc_charging_status)" != "enabled" ]]; then
+			log "❌ Charging is still not enabled after stopping maintenance (SMC reports $(get_smc_charging_status))"
+			exit 1
+		fi
 		$battery_binary status
 		exit 0
 	fi
 
-	# Start maintenance script
+	# Prove the SMC can be read before starting a loop that depends on it:
+	# a loop that cannot see the charging state cannot change it either.
+	# (A failed first write is caught by the liveness check below.)
+	if [[ "$(get_smc_charging_status)" == "unknown" ]]; then
+		log "❌ Cannot read the charging state from SMC, not starting maintenance"
+		exit 1
+	fi
+
+	# Start maintenance script. Both streams go to the logfile: a loop
+	# holding the starter's stderr open would keep any caller that
+	# captures the starter's output (GUI, scripts, $(...)) waiting forever.
 	if [ "$is_voltage" = true ]; then
 		log "Starting battery maintenance at ${setting}V ±${subsetting}V"
-		nohup $battery_binary maintain_voltage_synchronous $setting $subsetting >>$logfile &
+		nohup $battery_binary maintain_voltage_synchronous $setting $subsetting >>$logfile 2>&1 &
 	else
 		if valid_percentage_range "$setting"; then
 			log "Starting battery maintenance between ${setting/-/% and }%"
 		else
 			log "Starting battery maintenance at $setting% $subsetting"
 		fi
-		nohup $battery_binary maintain_synchronous $setting $subsetting >>$logfile &
+		nohup $battery_binary maintain_synchronous $setting $subsetting >>$logfile 2>&1 &
 	fi
 
 	# Store pid of maintenance process and setting
@@ -1413,6 +1724,14 @@ if [[ "$action" == "maintain" ]]; then
 
 	# Enable the daemon that continues maintaining after reboot
 	$battery_binary create_daemon
+
+	# The loop proves it can drive the SMC before the starter reports
+	# success: if it died on its first charging write, it is already gone.
+	sleep 5
+	if ! pid_is_alive "$pid"; then
+		log "❌ The maintenance loop exited immediately, see $logfile for why"
+		exit 1
+	fi
 
 	exit 0
 
@@ -1465,7 +1784,10 @@ if [[ "$action" == "calibrate" ]]; then
 		BATTERY_HELPER_MODE=1 $battery_binary charge 100 &>/dev/null
 
 		step "[ 3 ] Reached 100%, waiting for 1 hour"
-		enable_charging &>/dev/null
+		if ! enable_charging &>/dev/null; then
+			step "❌ Failed to enable charging, calibration cannot continue"
+			exit 1
+		fi
 		sleep 3600
 
 		step "[ 4 ] Discharging battery to 80%"
@@ -1632,7 +1954,11 @@ fi
 if [[ "$action" == "disable_daemon" ]]; then
 
 	log "Disabling daemon at gui/$(id -u $USER)/com.battery.app"
+	# Disabling alone does not stop a job that is already running: stop it
+	# too, so 'maintain stop' really ends maintenance. Stopping a job that
+	# is not running fails harmlessly (launchctl stop needs a loaded job).
 	launchctl disable "gui/$(id -u $USER)/com.battery.app"
+	launchctl stop "gui/$(id -u $USER)/com.battery.app" 2>/dev/null
 	exit 0
 
 fi
@@ -1640,7 +1966,11 @@ fi
 # Remove daemon
 if [[ "$action" == "remove_daemon" ]]; then
 
-	rm $daemon_path 2>/dev/null
+	# Disable and stop first so no launchd job is left running after the
+	# plist is gone, then remove the plist.
+	launchctl disable "gui/$(id -u $USER)/com.battery.app" 2>/dev/null
+	launchctl stop "gui/$(id -u $USER)/com.battery.app" 2>/dev/null
+	rm -f "$daemon_path"
 	exit 0
 
 fi

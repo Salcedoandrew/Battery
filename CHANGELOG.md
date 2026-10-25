@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.2 (CLI)
+
+- **Stop actually stops.** `battery maintain stop` now reliably stops the running limiter on Apple Silicon too — the maintain loops own the pidfile, so a stale PID can't leave a loop running, and the launchd login daemon is stopped as well as disabled. Stopping only signals a process it has verified is battery, waits for it to exit, and reports failure instead of claiming success.
+- **SMC failures are no longer reported as success.** A failed SMC read now reports charging as "unknown" instead of "disabled", and a failed SMC write makes the command exit with an error instead of printing success. If the first charging write fails, maintenance stops instead of looping forever on a dead SMC.
+- **Verified installs everywhere.** Fresh installs and `battery reinstall` now download `setup.sh`, `smc`, and `battery.sh` from the latest release and verify their SHA-256 checksums before installing — the same check `battery update` already did. The menu bar app's installer is pinned to the release tag instead of `main`, and `setup.sh` defaults to the latest release instead of `main`.
+- **Fixed:** `battery maintain 0` is no longer accepted (it disabled charging forever). Valid limits are now 10–100.
+
 ## v1.5.1 (CLI)
 
 - **Safer updates.** `battery update` no longer runs code straight from the `main` branch. It downloads `battery.sh` from the latest GitHub release and checks its SHA-256 checksum before installing, and refuses to install if the checksum doesn't match. `battery reinstall` now reinstalls from the latest release tag instead of `main`. Publish the checksum with every release: `./scripts/publish-cli-assets.sh v1.5.1`.
