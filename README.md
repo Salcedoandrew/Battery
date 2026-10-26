@@ -1,10 +1,24 @@
-# Battery charge limiter for Apple Silicon and Intel Macbook devices
+<p align="center"><img src="./screenshots/tray.png" alt="Battery tray icon" width="300"></p>
 
-<img width="300px" align="right" src="./screenshots/tray.png"/>This tool makes it possible to keep a chronically plugged in Apple Silicon Macbook at `80%` battery, since that will prolong the longevity of the battery. It is free and open-source and will remain that way.
+# Battery
+
+### Keep a chronically plugged-in MacBook at 80% to prolong battery life.
+
+[![GitHub release](https://img.shields.io/github/v/release/Salcedoandrew/battery)](https://github.com/Salcedoandrew/battery/releases/latest) [![License](https://img.shields.io/github/license/Salcedoandrew/battery)](LICENSE) [![Top language](https://img.shields.io/github/languages/top/Salcedoandrew/battery)](https://github.com/Salcedoandrew/battery) [![Last commit](https://img.shields.io/github/last-commit/Salcedoandrew/battery/main)](https://github.com/Salcedoandrew/battery/commits/main)
+
+[About](#-about) | [Technologies](#-main-technologies) | [Requirements](#-requirements) | [Installation](#-installation) | [Command-line version](#-command-line-version) | [FAQ & Troubleshooting](#-faq--troubleshooting) | [License](#-license)
+
+## 🎯 About
+
+This tool makes it possible to keep a chronically plugged in Apple Silicon Macbook at `80%` battery, since that will prolong the longevity of the battery. It is free and open-source and will remain that way.
 
 > Want to know if this tool does anything or is just a placebo? Read [this excellent article](https://batteryuniversity.com/article/bu-808-how-to-prolong-lithium-based-batteries). TL;DR: keep your battery cool, keep it at 80% when plugged in, and discharge it as shallowly as feasible.
 
-### Requirements
+## 🚀 Main Technologies
+
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/bash/bash-original.svg" alt="Bash logo" width="48" height="48"> <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/electron/electron-original.svg" alt="Electron logo" width="48" height="48"> <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/javascript/javascript-original.svg" alt="JavaScript logo" width="48" height="48"> <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/apple/apple-original.svg" alt="Apple logo" width="48" height="48">
+
+## ✅ Requirements
 
 This works on Apple Silicon Macs and, since CLI v1.4.0, on Intel Macs whose SMC has the `BCLM` charge limit key (most T2 Macs, e.g. the 2018-2020 MacBook Pro). Setup checks which keys your Mac has and stops with a clear message if none are supported.
 
@@ -23,7 +37,7 @@ This works on Apple Silicon Macs and, since CLI v1.4.0, on Intel Macs whose SMC 
 - `battery topup` charges once to 100%, then returns to your limit automatically; `battery topup stop` cancels.
 - `battery calibrate` on Intel charges to 100% and then asks you to unplug and run the battery down to about 15% (Intel has no forced discharge). On Apple Silicon it works as before. `battery calibrate stop` cancels.
 
-### Installation
+## 📦 Installation
 
 - Option 1: install the app through brew with `brew install battery`
 - Option 2: [download the app dmg version here](https://github.com/Salcedoandrew/battery/releases/) (this fork currently ships the CLI only; use Option 3)
@@ -44,7 +58,7 @@ Do you have questions, comments, or feature requests? [Open an issue here](https
 
 ---
 
-## 🖥 Command-line version
+## 🖥️ Command-line version
 
 > If you don't know what a "command line" is, ignore this section. You don't need it.
 
@@ -138,7 +152,7 @@ Usage:
     enable charging, remove the smc tool, and the battery script
 ```
 
-## FAQ & Troubleshooting
+## ❓ FAQ & Troubleshooting
 
 ### Why does this exist?
 
@@ -184,3 +198,11 @@ Do you know how to code? Open a pull-request for a feature with the label [help 
 Do you have an awesome feature idea? [Add a feature request](https://github.com/actuallymentor/battery/issues/new/choose)
 
 Do you just want to keep me motivated to update the app? [Tweet at me](https://twitter.com/actuallymentor)
+
+## 📝 License
+
+This project is licensed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file.
+
+Made with ❤️ by [Andrew Salcedo](https://github.com/Salcedoandrew)
+
+[Back to top](#battery)
