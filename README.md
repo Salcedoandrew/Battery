@@ -103,7 +103,7 @@ After running `battery charging on` you will see it change to this:
 For help, run `battery` without parameters:
 
 ```
-Battery CLI utility v1.5.2
+Battery CLI utility v1.5.3
 
 Usage:
 

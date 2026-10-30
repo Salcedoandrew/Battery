@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.5.2"
+BATTERY_CLI_VERSION="v1.5.3"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -1063,7 +1063,9 @@ if [[ "$action" == "update_silent" ]]; then
 		tempfolder="$(mktemp -d)"
 		function cleanup() { rm -rf "$tempfolder"; }
 		trap cleanup EXIT
-		verified="$(download_verified_cli "$latest" "$tempfolder")" || exit 1
+		# Keep the failure message: download_verified_cli prints it, and
+		# exiting silently would leave the GUI with nothing to report.
+		verified="$(download_verified_cli "$latest" "$tempfolder")" || { echo "$verified"; exit 1; }
 		install -d -m 755 -o root -g wheel "$binfolder"
 		install -m 755 -o root -g wheel "$verified" "$battery_binary"
 		echo "✅ battery background script was updated to $latest."
