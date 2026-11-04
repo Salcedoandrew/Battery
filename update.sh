@@ -63,7 +63,20 @@ if [[ $EUID -ne 0 && ! -x "$binfolder/battery" ]]; then
 		echo "❌ Can't check for updates: no internet connection (or GitHub unreachable)."
 		exit 1
 	fi
-	curl -sS "https://raw.githubusercontent.com/${github_user}/${github_repo}/${latest}/setup.sh" | BATTERY_REF="$latest" bash
+	# Legacy reinstall path (Terminal users on 1_3_2 or earlier): download
+	# setup.sh from the release assets and verify its checksum before
+	# running it — never pipe an unverified remote script into bash.
+	setup_tmp="$(mktemp -d)"
+	setup_url="${github_release_download}/${latest}/setup.sh"
+	if ! curl -fsSL -o "$setup_tmp/setup.sh" "$setup_url" || \
+	   ! curl -fsSL -o "$setup_tmp/setup.sh.sha256" "${setup_url}.sha256" || \
+	   ! (cd "$setup_tmp" && shasum -a 256 -c setup.sh.sha256 >/dev/null 2>&1); then
+		echo "❌ Failed to download or verify setup.sh for $latest. Refusing to run an unverified setup script."
+		rm -rf "$setup_tmp"
+		exit 1
+	fi
+	BATTERY_REF="$latest" bash "$setup_tmp/setup.sh"
+	rm -rf "$setup_tmp"
 	$binfolder/battery maintain recover
 	exit 0
 fi

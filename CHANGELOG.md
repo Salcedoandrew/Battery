@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.5.4 (CLI)
+
+- **Fixed:** `battery charge` no longer hangs forever when the battery percentage can't be read. An unreadable (empty/non-numeric) `pmset` value used to coerce to 0 in the charge loop's comparison, so the loop never exited — the script now exits with an error instead, both before charging starts and if the reading becomes unreadable mid-charge.
+
+## v1.5.3 (CLI)
+
+- **Fixed:** the standalone `update.sh` no longer pipes an unverified `setup.sh` from GitHub into bash for Terminal users updating from 1.3.2 or earlier — it now downloads `setup.sh` from the release assets and checks its SHA-256 checksum first, the same check `battery reinstall` already used.
+- **Fixed:** `battery update_silent` (run by the menu bar app) no longer swallows the download/verify failure message — the error text is printed before exiting so the failure is visible instead of silent.
+- **Fixed:** the Mac app and CLI versions are both bumped to 1.5.3, so the DMG/zip names and the app's reported version match the release tag.
+
 ## v1.5.2 (CLI)
 
 - **Stop actually stops.** `battery maintain stop` now reliably stops the running limiter on Apple Silicon too — the maintain loops own the pidfile, so a stale PID can't leave a loop running, and the launchd login daemon is stopped as well as disabled. Stopping only signals a process it has verified is battery, waits for it to exit, and reports failure instead of claiming success.
