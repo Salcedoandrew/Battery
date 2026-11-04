@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.5.4 (CLI)
+
+- **Fixed:** `battery charge` no longer hangs forever when the battery percentage can't be read. An unreadable (empty/non-numeric) `pmset` value used to coerce to 0 in the charge loop's comparison, so the loop never exited — the script now exits with an error instead, both before charging starts and if the reading becomes unreadable mid-charge.
+
 ## v1.5.3 (CLI)
 
 - **Fixed:** the standalone `update.sh` no longer pipes an unverified `setup.sh` from GitHub into bash for Terminal users updating from 1.3.2 or earlier — it now downloads `setup.sh` from the release assets and checks its SHA-256 checksum first, the same check `battery reinstall` already used.

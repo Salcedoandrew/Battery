@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.5.3"
+BATTERY_CLI_VERSION="v1.5.4"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -1236,6 +1236,10 @@ if [[ "$action" == "charge" ]]; then
 	# Start charging; a failed write must exit non-zero instead of looping
 	# forever waiting for a level that will never rise.
 	battery_percentage=$(get_battery_percentage)
+	if ! [[ "$battery_percentage" =~ ^[0-9]+$ ]]; then
+		log "❌ Could not read battery percentage, cannot start charging"
+		exit 1
+	fi
 	log "Charging to $setting% from $battery_percentage%"
 	enable_charging || { log "❌ Failed to enable charging"; exit 1; } # also disables discharging
 
@@ -1249,6 +1253,14 @@ if [[ "$action" == "charge" ]]; then
 		fi
 
 		battery_percentage=$(get_battery_percentage)
+
+		# Bail out if the percentage becomes unreadable mid-charge; an
+		# empty/non-numeric value coerces to 0 in the loop comparison
+		# below and would loop forever.
+		if ! [[ "$battery_percentage" =~ ^[0-9]+$ ]]; then
+			log "❌ Could not read battery percentage while charging, stopping"
+			exit 1
+		fi
 
 	done
 
